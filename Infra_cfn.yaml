@@ -44,7 +44,6 @@ Parameters:
     Description: The github branch to clone 
     Default: multi-agent-collaboration
 
-
 Mappings:
   RegionMap:
     us-east-1:
@@ -79,7 +78,7 @@ Resources:
       MasterUserPassword: !Ref RedshiftPassword
       ClusterType: single-node
       PubliclyAccessible: false
-      VpcSecurityGroupIds: [!Ref SecurityGroup]
+      VpcSecurityGroupIds: [!Ref RedshiftSecurityGroup]
       ClusterSubnetGroupName: !Ref RedshiftSubnetGroup
       ClusterParameterGroupName: !Ref RedshiftClusterParameterGroup
       Encrypted: true
@@ -134,14 +133,27 @@ Resources:
           PASSWORD: !Ref RedshiftPassword
         PhysicalConnectionRequirements:
           SubnetId: !Ref PrivateSubnet1
-          SecurityGroupIdList: [!Ref SecurityGroup]
+          SecurityGroupIdList: [!Ref RedshiftSecurityGroup]
           AvailabilityZone: !Select 
             - 0
             - !GetAZs 
               Ref: 'AWS::Region'
 
-  
-  SecurityGroup:
+  SageMakerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for SageMaker Domain
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 44
+          CidrIp: 10.0.0.0/16  # Only allow access from within VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-sagemaker-sg
+
+  RedshiftSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: Security group for Redshift cluster
@@ -578,7 +590,8 @@ Resources:
                   - 'ec2:DescribeSubnets'
                   - 'ec2:DescribeVpcs'
                 Resource:
-                  - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:security-group/${SecurityGroup}'
+                  - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:security-group/${RedshiftSecurityGroup}'
+                  - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:security-group/${SageMakerSecurityGroup}'
                   - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:subnet/${PrivateSubnet1}'
                   - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:subnet/${PrivateSubnet2}'
                   - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:vpc/${VPC}'
@@ -1102,38 +1115,6 @@ Resources:
                 Resource:
                   - !Sub arn:aws:s3:::${S3Bucket}
                   - !Sub arn:aws:s3:::${S3Bucket}/*
-  # Create SageMaker Domain
-  SageMakerDomain:
-    Type: AWS::SageMaker::Domain
-    Properties:
-      DomainName: !Ref DomainName
-      AuthMode: IAM
-      VpcId: !Ref VpcId
-      SubnetIds: !Ref SubnetIds
-      DefaultUserSettings:
-        ExecutionRole: !GetAtt SageMakerExecutionRole.Arn
-        SecurityGroups: !Ref SecurityGroupIds
-
-  # Create User Profile
-  UserProfile:
-    Type: AWS::SageMaker::UserProfile
-    Properties:
-      DomainId: !Ref SageMakerDomain
-      UserProfileName: !Ref UserProfileName
-      UserSettings:
-        ExecutionRole: !GetAtt SageMakerExecutionRole.Arn
-
-  # Create App (JupyterLab)
-  JupyterLabApp:
-    Type: AWS::SageMaker::App
-    Properties:
-      AppName: default
-      AppType: JupyterServer
-      DomainId: !Ref SageMakerDomain
-      UserProfileName: !Ref UserProfileName
-
-
-
   
   AgentandUICodeBuild:
     Type: AWS::CodeBuild::Project
@@ -1204,6 +1185,8 @@ Resources:
         GitRepoURL: !Ref GithubLink
         ImageTag: !Ref ImageTag
         GitBranch: !Ref GitBranch
+        VpcSubnetId: !Ref PrivateSubnet1       
+        VpcSecurityGroupId: !Ref SageMakerSecurityGroup
       TimeoutInMinutes: 35
 Outputs:
   RedshiftClusterEndpoint:

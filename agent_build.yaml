@@ -42,6 +42,14 @@ Parameters:
   SubAgentS3Bucket:
     Type: String
     Description: 'The S3 bucket containing the Subagents'
+  VpcSubnetId:
+    Type: String
+    Description: ID of the subnet for SageMaker Domain
+    NoEcho: true
+  VpcSecurityGroupId:
+    Type: String
+    Description: ID of the security group for SageMaker Domain
+    NoEcho: true
     
 
 
@@ -913,6 +921,36 @@ Resources:
                 Condition:
                   StringEquals:
                     'aws:RequestedRegion': !Ref 'AWS::Region'
+                    
+  SageMakerDomain:
+    Type: AWS::SageMaker::Domain
+    Properties:
+      DomainName: !Sub ${EnvironmentName}-domain
+      AuthMode: IAM
+      DefaultUserSettings:
+        ExecutionRole: !GetAtt SageMakerExecutionRole.Arn
+      VpcSettings:
+        SecurityGroupIds:
+          - !Ref VpcSecurityGroupId
+        SubnetIds:
+          - !Ref VpcSubnetId
+
+  SageMakerUserProfile:
+    Type: AWS::SageMaker::UserProfile
+    Properties:
+      DomainId: !Ref SageMakerDomain
+      UserProfileName: !Sub ${EnvironmentName}-user
+      UserSettings:
+        ExecutionRole: !GetAtt SageMakerExecutionRole.Arn
+
+  JupyterServerApp:
+    Type: AWS::SageMaker::App
+    Properties:
+      AppName: default
+      AppType: JupyterServer
+      DomainId: !Ref SageMakerDomain
+      UserProfileName: !Ref SageMakerUserProfile
+
   TriggerBuildLambda:
     Type: AWS::Lambda::Function
     Properties:
