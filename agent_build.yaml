@@ -1496,3 +1496,4 @@ Resources:
         AgentRole: !GetAtt AgentRole.Arn
         BedrockModelId: !Ref BedrockModelId
       TimeoutInMinutes: 30
+

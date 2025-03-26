@@ -1102,7 +1102,36 @@ Resources:
                 Resource:
                   - !Sub arn:aws:s3:::${S3Bucket}
                   - !Sub arn:aws:s3:::${S3Bucket}/*
-  
+  # Create SageMaker Domain
+  SageMakerDomain:
+    Type: AWS::SageMaker::Domain
+    Properties:
+      DomainName: !Ref DomainName
+      AuthMode: IAM
+      VpcId: !Ref VpcId
+      SubnetIds: !Ref SubnetIds
+      DefaultUserSettings:
+        ExecutionRole: !GetAtt SageMakerExecutionRole.Arn
+        SecurityGroups: !Ref SecurityGroupIds
+
+  # Create User Profile
+  UserProfile:
+    Type: AWS::SageMaker::UserProfile
+    Properties:
+      DomainId: !Ref SageMakerDomain
+      UserProfileName: !Ref UserProfileName
+      UserSettings:
+        ExecutionRole: !GetAtt SageMakerExecutionRole.Arn
+
+  # Create App (JupyterLab)
+  JupyterLabApp:
+    Type: AWS::SageMaker::App
+    Properties:
+      AppName: default
+      AppType: JupyterServer
+      DomainId: !Ref SageMakerDomain
+      UserProfileName: !Ref UserProfileName
+
 
 
   
