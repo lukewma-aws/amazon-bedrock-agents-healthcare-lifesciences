@@ -2,7 +2,7 @@ template-file-path: ./Infra_cfn.yaml
 parameters:
   BedrockModelId: amazon.nova-lite-v1:0
   EnvironmentName: test1
-  MultiAgentDevMode: 'True'
+  MultiAgentDevMode: "True"
 
 tags:
   Name: 'genovia-notebook-gitsync'
