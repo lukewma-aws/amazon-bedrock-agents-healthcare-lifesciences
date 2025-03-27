@@ -21,7 +21,8 @@ Parameters:
      - False
   GitRepoURL:
     Type: String
-    Default: 'https://github.com/aws-samples/amazon-bedrock-agents-cancer-biomarker-discovery.git'
+    #Default: 'https://github.com/aws-samples/amazon-bedrock-agents-cancer-biomarker-discovery.git'
+    Default: 'https://github.com/lukewma-aws/amazon-bedrock-agents-healthcare-lifesciences.git'
     Description: Git repository URL where the code files are stored
   ImageTag:
     Type: String
