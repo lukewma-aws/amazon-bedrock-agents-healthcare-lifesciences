@@ -1,0 +1,579 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudFormation template for AWS HealthOmics resources and genomic data ingestion flow'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: prodc
+    Description: Environment name for resource naming
+  
+  S3BucketName:
+    Type: String
+    Description: Name of the S3 bucket for input files
+    Default: genomic-data-prod
+
+  WorkflowId:
+    Type: String
+    Description: ID of the HealthOmics workflow to trigger
+    Default: "9500764"
+
+Resources:
+  #####################################
+  # S3 Buckets
+  #####################################
+  
+  InputBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${S3BucketName}-${AWS::AccountId}-${Environment}"
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  FallbackBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: InputBucket
+    Properties:
+      BucketName: !Sub "sequence-store-fallback-${AWS::AccountId}-${Environment}"
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  TestWorkshopBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: InputBucket
+    Properties:
+      BucketName: !Sub "test-workshop-genovia-${AWS::AccountId}-${Environment}"
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  WorkflowOutputBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: InputBucket
+    Properties:
+      BucketName: !Sub "workflow${WorkflowId}-output-bucket-${AWS::AccountId}-${Environment}"
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  #####################################
+  # IAM Roles
+  #####################################
+
+  S3ToSequenceStoreLambdaRole:
+    Type: AWS::IAM::Role
+    DependsOn: InputBucket
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: OmicsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - omics:StartReadSetImportJob
+                  - omics:GetReadSetImportJob
+                  - omics:ListReadSetImportJobs
+                Resource: '*'
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::${S3BucketName}"
+                  - !Sub "arn:aws:s3:::${S3BucketName}/*"
+
+  HealthOmicsRole:
+    Type: AWS::IAM::Role
+    DependsOn: InputBucket
+    Properties:
+      RoleName: !Sub "HealthOmicsRole-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: omics.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/AmazonOmicsFullAccess"
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt FallbackBucket.Arn
+                  - !Sub "${FallbackBucket.Arn}/*"
+                  - !GetAtt TestWorkshopBucket.Arn
+                  - !Sub "${TestWorkshopBucket.Arn}/*"
+                  - !GetAtt WorkflowOutputBucket.Arn
+                  - !Sub "${WorkflowOutputBucket.Arn}/*"
+                  - !Sub "arn:aws:s3:::${S3BucketName}"
+                  - !Sub "arn:aws:s3:::${S3BucketName}/*"
+
+  #####################################
+  # Bucket Policies
+  #####################################
+
+  InputBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    DependsOn: 
+      - InputBucket
+      - S3ToSequenceStoreLambdaRole
+    Properties:
+      Bucket: !Ref InputBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowLambdaAccess
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt S3ToSequenceStoreLambdaRole.Arn
+            Action:
+              - s3:GetObject
+              - s3:ListBucket
+            Resource:
+              - !GetAtt InputBucket.Arn
+              - !Sub "${InputBucket.Arn}/*"
+          - Sid: AllowOmicsService
+            Effect: Allow
+            Principal:
+              Service: omics.amazonaws.com
+            Action:
+              - s3:GetObject
+              - s3:ListBucket
+            Resource:
+              - !GetAtt InputBucket.Arn
+              - !Sub "${InputBucket.Arn}/*"
+          - Sid: EnforceSecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt InputBucket.Arn
+              - !Sub "${InputBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+  #####################################
+  # HealthOmics Resources
+  #####################################
+
+  DefaultReferenceStore:
+    Type: AWS::Omics::ReferenceStore
+    DependsOn: InputBucket
+    Properties:
+      Name: !Sub "reference_store_${AWS::AccountId}_${Environment}"
+      Description: !Sub "Default reference store for account ${AWS::AccountId} in ${Environment} environment"
+
+  SequenceStore1:
+    Type: AWS::Omics::SequenceStore
+    DependsOn: InputBucket
+    Properties:
+      Name: !Sub "sequence_store_1_${AWS::AccountId}_${Environment}"
+      Description: !Sub "Sequence store 1 for account ${AWS::AccountId} in ${Environment} environment"
+
+  WorkflowSequenceStore:
+    Type: AWS::Omics::SequenceStore
+    DependsOn: 
+      - InputBucket
+      - FallbackBucket
+      - HealthOmicsRole
+    Properties:
+      Name: !Sub "workflow_sequence_store_${AWS::AccountId}_${Environment}"
+      Description: !Sub "Workflow sequence store for account ${AWS::AccountId} in ${Environment} environment"
+      FallbackLocation: !Sub "s3://${FallbackBucket}/fallback/"
+
+  TestWorkshopSequenceStore:
+    Type: AWS::Omics::SequenceStore
+    DependsOn:
+      - InputBucket
+      - TestWorkshopBucket
+      - HealthOmicsRole
+    Properties:
+      Name: !Sub "test_workshop_sequence_store_${AWS::AccountId}_${Environment}"
+      Description: !Sub "Test workshop sequence store for account ${AWS::AccountId} in ${Environment} environment"
+      FallbackLocation: !Sub "s3://${TestWorkshopBucket}/fallback/"
+
+  VariantStore:
+    Type: AWS::Omics::VariantStore
+    DependsOn: 
+      - InputBucket
+      - DefaultReferenceStore
+    Properties:
+      Name: !Sub "variant_store_${AWS::AccountId}_${Environment}"
+      Description: !Sub "Variant Store for account ${AWS::AccountId} in ${Environment} environment"
+      Reference:
+        ReferenceArn: !GetAtt DefaultReferenceStore.Arn
+
+  #####################################
+  # Lambda Functions
+  #####################################
+
+  S3ToSequenceStoreTriggerFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: 
+      - InputBucket
+      - S3ToSequenceStoreLambdaRole
+    Properties:
+      FunctionName: !Sub s3toSequenceStoreTriggerFunction
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt S3ToSequenceStoreLambdaRole.Arn
+      Runtime: python3.13
+      Timeout: 300
+      MemorySize: 128
+      Environment:
+        Variables:
+          SEQUENCE_STORE_ID: !Sub "workflow_sequence_store_${AWS::AccountId}_${Environment}"
+          ROLE_ARN: !GetAtt S3ToSequenceStoreLambdaRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          import urllib.parse
+          
+          def lambda_handler(event, context):
+              # Get environment variables
+              sequence_store_id = os.environ['SEQUENCE_STORE_ID']
+              role_arn = os.environ['ROLE_ARN']
+              
+              # Initialize HealthOmics client
+              omics_client = boto3.client('omics')
+              
+              # Get bucket and key from event
+              bucket = event['Records'][0]['s3']['bucket']['name']
+              key = urllib.parse.unquote_plus(event['Records'][0]['s3']['object']['key'])
+              
+              # Check if the file is a FASTQ file
+              if not (key.endswith('.fastq.gz') or key.endswith('.fq.gz')):
+                  print(f"File {key} is not a FASTQ file, skipping")
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps('Not a FASTQ file, skipping')
+                  }
+              
+              # Extract sample information from filename
+              # Assuming filename format: SAMPLEID.R1.fastq.gz or SAMPLEID.R2.fastq.gz
+              filename = key.split('/')[-1]
+              sample_id = filename.split('.')[0]
+              
+              # Determine if R1 or R2
+              is_r1 = '.R1.' in filename
+              is_r2 = '.R2.' in filename
+              
+              if not (is_r1 or is_r2):
+                  print(f"Cannot determine if file {key} is R1 or R2, skipping")
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps('Cannot determine read type, skipping')
+                  }
+              
+              # If R1, look for corresponding R2 file
+              if is_r1:
+                  r2_key = key.replace('.R1.', '.R2.')
+                  source_files = [
+                      {
+                          'sourceFile': f"s3://{bucket}/{key}",
+                          'sourceFileType': 'FASTQ',
+                      },
+                      {
+                          'sourceFile': f"s3://{bucket}/{r2_key}",
+                          'sourceFileType': 'FASTQ',
+                      }
+                  ]
+                  
+                  # Start import job
+                  try:
+                      response = omics_client.start_read_set_import_job(
+                          sequenceStoreId=sequence_store_id,
+                          roleArn=role_arn,
+                          sources=source_files,
+                          subjectId='subject1',
+                          sampleId=sample_id,
+                          name=f"Import-{sample_id}"
+                      )
+                      
+                      print(f"Started import job: {response['id']}")
+                      return {
+                          'statusCode': 200,
+                          'body': json.dumps(f"Started import job: {response['id']}")
+                      }
+                  except Exception as e:
+                      print(f"Error starting import job: {str(e)}")
+                      return {
+                          'statusCode': 500,
+                          'body': json.dumps(f"Error: {str(e)}")
+                      }
+              else:
+                  # If R2, do nothing as it will be processed when R1 is uploaded
+                  print(f"R2 file {key} detected, will be processed with corresponding R1")
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps('R2 file will be processed with R1')
+                  }
+      Description: Trigger function for S3 events to import into Sequence Store
+
+  #####################################
+  # Lambda Permissions
+  #####################################
+
+  S3InvokeLambdaPermission:
+    Type: AWS::Lambda::Permission
+    DependsOn:
+      - InputBucket
+      - S3ToSequenceStoreTriggerFunction
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref S3ToSequenceStoreTriggerFunction
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !Sub "arn:aws:s3:::${S3BucketName}"
+
+  #####################################
+  # Custom Resource for S3 Notifications
+  #####################################
+
+  NotificationConfigurationFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: NotificationConfigurationRole
+    Properties:
+      FunctionName: !Sub "notification-config-function-${Environment}"
+      Handler: index.handler
+      Role: !GetAtt NotificationConfigurationRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import logging
+          from botocore.exceptions import ClientError
+          
+          # Set up logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          
+          def send_response(event, context, response_status, response_data):
+              response_body = {
+                  'Status': response_status,
+                  'Reason': f'See the details in CloudWatch Log Stream: {context.log_stream_name}',
+                  'PhysicalResourceId': context.log_stream_name,
+                  'StackId': event['StackId'],
+                  'RequestId': event['RequestId'],
+                  'LogicalResourceId': event['LogicalResourceId'],
+                  'Data': response_data
+              }
+              
+              logger.info(f'Response body: {json.dumps(response_body)}')
+              
+              response_url = event['ResponseURL']
+              
+              try:
+                  import urllib3
+                  http = urllib3.PoolManager()
+                  response = http.request(
+                      'PUT',
+                      response_url,
+                      headers={'Content-Type': ''},
+                      body=json.dumps(response_body).encode('utf-8')
+                  )
+                  logger.info(f"CloudFormation response status code: {response.status}")
+                  return True
+              except Exception as e:
+                  logger.error(f"Failed to send response to CloudFormation: {str(e)}")
+                  return False
+          
+          def handler(event, context):
+              logger.info(f"Received event: {json.dumps(event)}")
+              
+              try:
+                  if event['RequestType'] in ['Create', 'Update']:
+                      s3 = boto3.client('s3')
+                      
+                      bucket_name = event['ResourceProperties']['BucketName']
+                      notification_config = event['ResourceProperties']['NotificationConfiguration']
+                      
+                      logger.info(f"Configuring notifications for bucket: {bucket_name}")
+                      logger.info(f"Notification configuration: {json.dumps(notification_config)}")
+                      
+                      # Ensure the configuration is a dictionary
+                      if isinstance(notification_config, str):
+                          notification_config = json.loads(notification_config)
+                      
+                      # Add empty lists for other notification types if not present
+                      full_config = {
+                          'LambdaFunctionConfigurations': notification_config.get('LambdaFunctionConfigurations', []),
+                          'QueueConfigurations': [],
+                          'TopicConfigurations': []
+                      }
+                      
+                      try:
+                          s3.put_bucket_notification_configuration(
+                              Bucket=bucket_name,
+                              NotificationConfiguration=full_config
+                          )
+                          logger.info("Successfully configured bucket notifications")
+                          return send_response(event, context, 'SUCCESS', {})
+                      except ClientError as e:
+                          error_message = f"Failed to configure bucket notifications: {str(e)}"
+                          logger.error(error_message)
+                          return send_response(event, context, 'FAILED', {'Error': error_message})
+                  
+                  elif event['RequestType'] == 'Delete':
+                      # For delete, we'll remove all notifications
+                      s3 = boto3.client('s3')
+                      bucket_name = event['ResourceProperties']['BucketName']
+                      
+                      try:
+                          s3.put_bucket_notification_configuration(
+                              Bucket=bucket_name,
+                              NotificationConfiguration={
+                                  'LambdaFunctionConfigurations': [],
+                                  'QueueConfigurations': [],
+                                  'TopicConfigurations': []
+                              }
+                          )
+                          logger.info("Successfully removed bucket notifications")
+                          return send_response(event, context, 'SUCCESS', {})
+                      except ClientError as e:
+                          error_message = f"Failed to remove bucket notifications: {str(e)}"
+                          logger.error(error_message)
+                          return send_response(event, context, 'FAILED', {'Error': error_message})
+                  
+                  return send_response(event, context, 'SUCCESS', {})
+              
+              except Exception as e:
+                  error_message = f"Unexpected error: {str(e)}"
+                  logger.error(error_message)
+                  return send_response(event, context, 'FAILED', {'Error': error_message})
+      Runtime: python3.9
+      Timeout: 30
+
+  NotificationConfigurationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: S3NotificationAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutBucketNotification
+                  - s3:PutBucketNotificationConfiguration
+                  - s3:GetBucketNotification
+                  - s3:GetBucketNotificationConfiguration
+                Resource: !GetAtt InputBucket.Arn
+
+  NotificationConfiguration:
+    Type: Custom::S3BucketNotification
+    DependsOn:
+      - InputBucket
+      - S3ToSequenceStoreTriggerFunction
+      - S3InvokeLambdaPermission
+      - NotificationConfigurationFunction
+    Properties:
+      ServiceToken: !GetAtt NotificationConfigurationFunction.Arn
+      BucketName: !Ref InputBucket
+      NotificationConfiguration:
+        LambdaFunctionConfigurations:
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt S3ToSequenceStoreTriggerFunction.Arn
+
+Outputs:
+  InputBucketName:
+    Description: Name of the input S3 bucket
+    Value: !Ref InputBucket
+
+  WorkflowSequenceStoreId:
+    Description: ID of the workflow sequence store
+    Value: !Ref WorkflowSequenceStore
+
+  ReferenceStoreArn:
+    Description: ARN of the Reference Store
+    Value: !GetAtt DefaultReferenceStore.Arn
+
+  SequenceStore1Arn:
+    Description: ARN of the first Sequence Store
+    Value: !Ref SequenceStore1
+
+  WorkflowSequenceStoreArn:
+    Description: ARN of the Workflow Sequence Store
+    Value: !Ref WorkflowSequenceStore 
+
+  TestWorkshopSequenceStoreArn:
+    Description: ARN of the Test Workshop Sequence Store
+    Value: !Ref TestWorkshopSequenceStore
+
+  VariantStoreArn:
+    Description: ARN of Variant Store 
+    Value: !Ref VariantStore  # Changed from GetAtt to Ref temporarily
+
+  FallbackBucketName:
+    Description: Name of the Fallback S3 Bucket
+    Value: !Ref FallbackBucket
+
+  TestWorkshopBucketName:
+    Description: Name of the Test Workshop S3 Bucket
+    Value: !Ref TestWorkshopBucket
