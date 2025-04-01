@@ -374,90 +374,86 @@ Resources:
           ROLE_ARN: !GetAtt S3ToSequenceStoreLambdaRole.Arn
       Code:
         ZipFile: |
-          import json
           import boto3
+          import json
           import os
           import urllib.parse
-          
+
+          omics = boto3.client('omics')
+          s3 = boto3.client('s3')
+
+          def verify_fastq_file(bucket, key):
+              try:
+                  response = s3.head_object(Bucket=bucket, Key=key)
+                  print(f"Verifying file {key}:")
+                  print(f"ContentLength: {response.get('ContentLength')}")
+                  print(f"ContentType: {response.get('ContentType')}")
+                  print(f"ETag: {response.get('ETag')}")
+                  return True
+              except Exception as e:
+                  print(f"Error verifying {key}: {str(e)}")
+                  return False
+
           def lambda_handler(event, context):
-              # Get environment variables
-              sequence_store_id = os.environ['SEQUENCE_STORE_ID']
-              role_arn = os.environ['ROLE_ARN']
-              
-              # Initialize HealthOmics client
-              omics_client = boto3.client('omics')
-              
-              # Get bucket and key from event
-              bucket = event['Records'][0]['s3']['bucket']['name']
-              key = urllib.parse.unquote_plus(event['Records'][0]['s3']['object']['key'])
-              
-              # Check if the file is a FASTQ file
-              if not (key.endswith('.fastq.gz') or key.endswith('.fq.gz')):
-                  print(f"File {key} is not a FASTQ file, skipping")
-                  return {
-                      'statusCode': 200,
-                      'body': json.dumps('Not a FASTQ file, skipping')
-                  }
-              
-              # Extract sample information from filename
-              # Assuming filename format: SAMPLEID.R1.fastq.gz or SAMPLEID.R2.fastq.gz
-              filename = key.split('/')[-1]
-              sample_id = filename.split('.')[0]
-              
-              # Determine if R1 or R2
-              is_r1 = '.R1.' in filename
-              is_r2 = '.R2.' in filename
-              
-              if not (is_r1 or is_r2):
-                  print(f"Cannot determine if file {key} is R1 or R2, skipping")
-                  return {
-                      'statusCode': 200,
-                      'body': json.dumps('Cannot determine read type, skipping')
-                  }
-              
-              # If R1, look for corresponding R2 file
-              if is_r1:
-                  r2_key = key.replace('.R1.', '.R2.')
-                  source_files = [
-                      {
-                          'sourceFile': f"s3://{bucket}/{key}",
-                          'sourceFileType': 'FASTQ',
-                      },
-                      {
-                          'sourceFile': f"s3://{bucket}/{r2_key}",
-                          'sourceFileType': 'FASTQ',
-                      }
-                  ]
+              try:
+                  bucket = event['Records'][0]['s3']['bucket']['name']
+                  key = urllib.parse.unquote_plus(event['Records'][0]['s3']['object']['key'], encoding='utf-8')
                   
-                  # Start import job
-                  try:
-                      response = omics_client.start_read_set_import_job(
-                          sequenceStoreId=sequence_store_id,
-                          roleArn=role_arn,
-                          sources=source_files,
-                          subjectId='subject1',
-                          sampleId=sample_id,
-                          name=f"Import-{sample_id}"
-                      )
-                      
-                      print(f"Started import job: {response['id']}")
-                      return {
-                          'statusCode': 200,
-                          'body': json.dumps(f"Started import job: {response['id']}")
-                      }
-                  except Exception as e:
-                      print(f"Error starting import job: {str(e)}")
-                      return {
-                          'statusCode': 500,
-                          'body': json.dumps(f"Error: {str(e)}")
-                      }
-              else:
-                  # If R2, do nothing as it will be processed when R1 is uploaded
-                  print(f"R2 file {key} detected, will be processed with corresponding R1")
+                  if '.R1.' in key:
+                      r1_key, r2_key = key, key.replace('.R1.', '.R2.')
+                  else:
+                      r1_key, r2_key = key.replace('.R2.', '.R1.'), key
+
+                  # Verify both files exist and are accessible
+                  print("\nVerifying files...")
+                  if not verify_fastq_file(bucket, r1_key):
+                      raise Exception(f"Failed to validate R1 file: {r1_key}")
+                  if not verify_fastq_file(bucket, r2_key):
+                      raise Exception(f"Failed to validate R2 file: {r2_key}")
+
+                  # Try listing the bucket contents to verify access
+                  print("\nListing bucket contents...")
+                  s3_objects = s3.list_objects_v2(
+                      Bucket=bucket,
+                      Prefix=r1_key.split('/')[0]
+                  )
+                  print(f"Found {s3_objects.get('KeyCount')} objects with matching prefix")
+
+                  import_request = {
+                      'sequenceStoreId': os.environ['SEQUENCE_STORE_ID'],
+                      'roleArn': os.environ['ROLE_ARN'],
+                      'sources': [{
+                          'sourceFiles': {
+                              'source1': f's3://{bucket}/{r1_key}',
+                              'source2': f's3://{bucket}/{r2_key}'
+                          },
+                          'name': r1_key.split('/')[-1].split('.R1.')[0],
+                          'sourceFileType': 'FASTQ',
+                          'subjectId': 'subject1',
+                          'sampleId': 'sample1'
+                      }]
+                  }
+
+                  print("\nImport request:", json.dumps(import_request, indent=2))
+                  
+                  response = omics.start_read_set_import_job(**import_request)
+                  
                   return {
                       'statusCode': 200,
-                      'body': json.dumps('R2 file will be processed with R1')
+                      'body': json.dumps({
+                          'message': 'Import job started successfully',
+                          'jobId': response['id']
+                      })
                   }
+              
+              except Exception as e:
+                  print(f'Error: {str(e)}')
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps({
+                          'message': f'Error: {str(e)}'
+                      })
+                }
       Description: Trigger function for S3 events to import into Sequence Store
 
   #####################################
