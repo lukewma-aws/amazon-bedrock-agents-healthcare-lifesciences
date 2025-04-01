@@ -32,10 +32,6 @@ Parameters:
     Type: String
     Default: nmcicollection
     Description: Name of the vector store/collection
-  IndexName:
-    Type: String
-    Default: vector-index
-    Description: Name of the vector index to be created
   GitBranch:
     Type: String
     Description: The github branch to clone
@@ -195,9 +191,6 @@ Resources:
 
   CleanupCustomResource:
     Type: Custom::Cleanup
-    DependsOn: 
-      - S3Bucket
-      - ECRRepository
     Properties:
       ServiceToken: !GetAtt CleanupLambdaFunction.Arn
       ECRRepositoryName: !Ref ECRRepository
@@ -1065,21 +1058,18 @@ Resources:
   
   TriggerBuildCustomResource:
     Type: Custom::TriggerBuild
-    DependsOn: DockerPushLogic
     Properties:
       ServiceToken: !GetAtt TriggerBuildLambda.Arn
       ProjectName: !Ref DockerPushLogic
   
   TriggerImagingDockerBuild:
     Type: Custom::TriggerBuild
-    DependsOn: ImagingDockerBuildProject
     Properties:
       ServiceToken: !GetAtt TriggerBuildLambda.Arn
       ProjectName: !Ref ImagingDockerBuildProject
   
   TriggerDataRetrievalLogic:
     Type: Custom::TriggerBuild
-    DependsOn: DataRetrievalLogic
     Properties:
       ServiceToken: !GetAtt TriggerBuildLambda.Arn
       ProjectName: !Ref DataRetrievalLogic
@@ -1109,7 +1099,7 @@ Resources:
                 Action:
                   - bedrock:*
                 Resource: 
-                  - !Sub arn:aws:bedrock:*::foundation-model/*
+                  - arn:aws:bedrock:*::foundation-model/*
                   - !Sub arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/*
                   - !Sub arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent-alias/*
                   - !Sub arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent/*
@@ -1262,6 +1252,7 @@ Resources:
                   - ecr:SetRepositoryPolicy  
                 Resource:
                   - !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/*
+                  - !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:*
                   - !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/medical-image-processing-smstudio
         - PolicyName: CreateServiceLinkedRole
           PolicyDocument:
