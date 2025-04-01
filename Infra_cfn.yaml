@@ -28,8 +28,8 @@ Parameters:
   GithubLink:
    Type: String
    Description: 'The link to the agent build cloudformation stack'
-   #Default: 'https://github.com/aws-samples/amazon-bedrock-agents-cancer-biomarker-discovery.git'
-   Default: 'https://github.com/lukewma-aws/amazon-bedrock-agents-healthcare-lifesciences.git'
+   Default: 'https://github.com/aws-samples/amazon-bedrock-agents-cancer-biomarker-discovery.git'
+   #Default: 'https://github.com/lukewma-aws/amazon-bedrock-agents-healthcare-lifesciences.git'
   ImageTag:
     Type: String
     Default: latest
