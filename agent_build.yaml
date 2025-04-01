@@ -933,7 +933,7 @@ Resources:
         ExecutionRole: !GetAtt SageMakerExecutionRole.Arn
       SubnetIds:
       - !Ref VpcSubnetId
-      VpcId: !!Ref VpcId
+      VpcId: !Ref VpcId
 
   SageMakerUserProfile:
     Type: AWS::SageMaker::UserProfile
