@@ -44,12 +44,13 @@ Parameters:
   SubAgentS3Bucket:
     Type: String
     Description: 'The S3 bucket containing the Subagents'
+  VpcSubnetId:
+    Type: String
+    Description: ID of the subnet for SageMaker Domain
+    NoEcho: true
   VpcId:
     Type: String
     Description: ID of the vpc for SageMaker Domain
-  VpcSecurityGroupId:
-    Type: String
-    Description: ID of the security group for SageMaker Domain
     NoEcho: true
     
 
@@ -928,11 +929,11 @@ Resources:
     Properties:
       DomainName: !Sub ${EnvironmentName}-domain
       AuthMode: IAM
-      VpcId: !Ref VpcId
-      SubnetIds:
-      - !Ref VpcSubnetId
       DefaultUserSettings:
         ExecutionRole: !GetAtt SageMakerExecutionRole.Arn
+      SubnetIds:
+      - !Ref VpcSubnetId
+      VpcId: !!Ref VpcId
 
   SageMakerUserProfile:
     Type: AWS::SageMaker::UserProfile

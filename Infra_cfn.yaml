@@ -1175,8 +1175,8 @@ Resources:
         EnvironmentName: !Ref EnvironmentName
         GitBranch: !Ref GitBranch
         SubAgentS3Bucket: !Ref S3Bucket
-        VpcID : !Ref VPC       
-        VpcSecurityGroupId: !Ref SageMakerSecurityGroup
+        VpcSubnetId: !Ref PrivateSubnet1       
+        VpcId: !Ref VPC
       TimeoutInMinutes: 30
   StreamlitBuildNestedStack:
     Type: AWS::CloudFormation::Stack
