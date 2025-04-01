@@ -1099,7 +1099,7 @@ Resources:
                 Action:
                   - bedrock:*
                 Resource: 
-                  - arn:aws:bedrock:*::foundation-model/*
+                  - !Sub arn:aws:bedrock:*::foundation-model/*
                   - !Sub arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/*
                   - !Sub arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent-alias/*
                   - !Sub arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent/*
