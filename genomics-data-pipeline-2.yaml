@@ -172,7 +172,6 @@ Resources:
 
   InputBucketPolicy:
     Type: AWS::S3::BucketPolicy
-    DependsOn: 
     Properties:
       Bucket: !Ref InputBucket
       PolicyDocument:
@@ -265,7 +264,6 @@ Resources:
     Type: AWS::Lambda::Function
     DependsOn: 
       - InputBucket
-      - S3ToSequenceStoreLambdaRole
     Properties:
       FunctionName: s3toSequenceStoreTriggerFunction
       Handler: lambda_function.lambda_handler
@@ -518,9 +516,7 @@ Resources:
               - Effect: Allow
                 Action:
                   - s3:PutBucketNotification
-                  - s3:PutBucketNotificationConfiguration
                   - s3:GetBucketNotification
-                  - s3:GetBucketNotificationConfiguration
                 Resource: !GetAtt InputBucket.Arn
 
   NotificationConfiguration:
