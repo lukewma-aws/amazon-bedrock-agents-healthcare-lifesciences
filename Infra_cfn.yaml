@@ -1175,7 +1175,7 @@ Resources:
         EnvironmentName: !Ref EnvironmentName
         GitBranch: !Ref GitBranch
         SubAgentS3Bucket: !Ref S3Bucket
-        VpcSubnetId: !Ref PrivateSubnet1       
+        VpcID : !Ref VPC       
         VpcSecurityGroupId: !Ref SageMakerSecurityGroup
       TimeoutInMinutes: 30
   StreamlitBuildNestedStack:
