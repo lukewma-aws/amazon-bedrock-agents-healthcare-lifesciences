@@ -197,6 +197,195 @@ Resources:
       S3BucketName: !Ref S3Bucket
       LogBucketName: !Ref LogBucket
   
+  SageMakerDomainCleanupFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt SageMakerDomainCleanupRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+          import time
+
+          def handler(event, context):
+              if event['RequestType'] == 'Delete':
+                  sm = boto3.client('sagemaker')
+                  ec2 = boto3.client('ec2')
+                  efs = boto3.client('efs')
+                  domain_id = event['ResourceProperties']['DomainId']
+                  vpc_id = event['ResourceProperties']['VpcId']
+                  
+                  try:
+                      # Get domain details to find EFS and ENIs
+                      try:
+                          domain = sm.describe_domain(DomainId=domain_id)
+                          domain_efs_id = domain['HomeEfsFileSystemId']
+                          
+                          # Find ENIs associated with the domain
+                          enis = ec2.describe_network_interfaces(
+                              Filters=[
+                                  {
+                                      'Name': 'vpc-id',
+                                      'Values': [vpc_id]
+                                  },
+                                  {
+                                      'Name': 'description',
+                                      'Values': [f'*SageMaker*{domain_id}*']
+                                  }
+                              ]
+                          )['NetworkInterfaces']
+                      except sm.exceptions.ResourceNotFound:
+                          print("Domain not found, might be already deleted")
+                          domain_efs_id = None
+                          enis = []
+
+                      # Delete all apps
+                      try:
+                          apps = sm.list_apps(DomainIdEquals=domain_id)['Apps']
+                          for app in apps:
+                              print(f"Deleting app: {app['AppName']}")
+                              sm.delete_app(
+                                  DomainId=domain_id,
+                                  UserProfileName=app['UserProfileName'],
+                                  AppType=app['AppType'],
+                                  AppName=app['AppName']
+                              )
+                              
+                          # Wait for apps to be deleted
+                          while True:
+                              apps = sm.list_apps(DomainIdEquals=domain_id)['Apps']
+                              if not apps:
+                                  break
+                              time.sleep(30)
+                      except sm.exceptions.ResourceNotFound:
+                          print("No apps found")
+                      
+                      # Delete all user profiles
+                      try:
+                          user_profiles = sm.list_user_profiles(DomainIdEquals=domain_id)['UserProfiles']
+                          for profile in user_profiles:
+                              print(f"Deleting user profile: {profile['UserProfileName']}")
+                              sm.delete_user_profile(
+                                  DomainId=domain_id,
+                                  UserProfileName=profile['UserProfileName']
+                              )
+                              
+                          # Wait for user profiles to be deleted
+                          while True:
+                              profiles = sm.list_user_profiles(DomainIdEquals=domain_id)['UserProfiles']
+                              if not profiles:
+                                  break
+                              time.sleep(30)
+                      except sm.exceptions.ResourceNotFound:
+                          print("No user profiles found")
+                      
+                      # Delete the domain
+                      try:
+                          print(f"Deleting domain: {domain_id}")
+                          sm.delete_domain(DomainId=domain_id)
+                          
+                          # Wait for domain deletion to complete
+                          while True:
+                              try:
+                                  sm.describe_domain(DomainId=domain_id)
+                                  time.sleep(30)
+                              except sm.exceptions.ResourceNotFound:
+                                  break
+                      except sm.exceptions.ResourceNotFound:
+                          print("Domain already deleted")
+
+                      # Delete ENIs
+                      for eni in enis:
+                          try:
+                              print(f"Deleting ENI: {eni['NetworkInterfaceId']}")
+                              ec2.delete_network_interface(NetworkInterfaceId=eni['NetworkInterfaceId'])
+                          except Exception as e:
+                              print(f"Error deleting ENI {eni['NetworkInterfaceId']}: {str(e)}")
+                      
+                      # Delete EFS
+                      if domain_efs_id:
+                          try:
+                              # Delete mount targets first
+                              mount_targets = efs.describe_mount_targets(FileSystemId=domain_efs_id)['MountTargets']
+                              for mount_target in mount_targets:
+                                  print(f"Deleting mount target: {mount_target['MountTargetId']}")
+                                  efs.delete_mount_target(MountTargetId=mount_target['MountTargetId'])
+                              
+                              # Wait for mount targets to be deleted
+                              while True:
+                                  try:
+                                      mount_targets = efs.describe_mount_targets(FileSystemId=domain_efs_id)['MountTargets']
+                                      if not mount_targets:
+                                          break
+                                      time.sleep(30)
+                                  except efs.exceptions.FileSystemNotFound:
+                                      break
+                              
+                              # Delete the EFS
+                              print(f"Deleting EFS: {domain_efs_id}")
+                              efs.delete_file_system(FileSystemId=domain_efs_id)
+                          except Exception as e:
+                              print(f"Error deleting EFS {domain_efs_id}: {str(e)}")
+                      
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                  except Exception as e:
+                      print(f"Error: {str(e)}")
+                      cfnresponse.send(event, context, cfnresponse.FAILED, {"Error": str(e)})
+              else:
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+
+      Runtime: python3.8
+      Timeout: 900
+
+  SageMakerDomainCleanupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SageMakerDomainCleanup
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sagemaker:ListApps
+                  - sagemaker:DeleteApp
+                  - sagemaker:ListUserProfiles
+                  - sagemaker:DeleteUserProfile
+                  - sagemaker:DeleteDomain
+                  - sagemaker:DescribeDomain
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - elasticfilesystem:DeleteFileSystem
+                  - elasticfilesystem:DeleteMountTarget
+                  - elasticfilesystem:DescribeMountTargets
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+
+  SageMakerDomainCleanup:
+    Type: Custom::SageMakerDomainCleanup
+    Properties:
+      ServiceToken: !GetAtt SageMakerDomainCleanupFunction.Arn
+      DomainId: !Ref SageMakerDomain
+      VpcId: !Ref VPC
   
   S3Bucket: 
      Type: AWS::S3::Bucket
