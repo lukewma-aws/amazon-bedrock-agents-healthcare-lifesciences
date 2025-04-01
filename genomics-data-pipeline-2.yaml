@@ -237,7 +237,9 @@ Resources:
             Condition:
               Bool:
                 aws:SecureTransport: false
-    TestWorkshopBucketPolicy:
+
+
+  TestWorkshopBucketPolicy:
     DependsOn: 
       - TestWorkshopBucket
       - HealthOmicsRole
