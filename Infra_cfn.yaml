@@ -45,6 +45,14 @@ Parameters:
     Description: The github branch to clone 
     Default: multi-agent-collaboration
     #Default: multi-agent-notebook
+  DeployBranch:
+    Type: String
+    Description: The branch to deploy from
+    Default: multi-agent-notebook
+  DeployRepo:
+    Type: String
+    Description: The repo to deploy from
+    Default: 'https://github.com/lukewma-aws/amazon-bedrock-agents-healthcare-lifesciences.git'
 
 Mappings:
   RegionMap:
@@ -1180,7 +1188,8 @@ Resources:
         BedrockModelId: !Ref BedrockModelId
         MultiAgentDevMode: !Ref MultiAgentDevMode
         EnvironmentName: !Ref EnvironmentName
-        GitBranch: !Ref GitBranch
+        #GitBranch: !Ref GitBranch
+        GitBranch: !Ref DeployBranch
         SubAgentS3Bucket: !Ref S3Bucket
         VpcSubnetId: !Ref PrivateSubnet1       
         VpcId: !Ref VPC
@@ -1193,9 +1202,11 @@ Resources:
       TemplateURL: !Sub https://${S3Bucket}.s3.${AWS::Region}.amazonaws.com/packaged_streamlit_build.yaml
       Parameters:
         EnvironmentName: !Ref EnvironmentName
-        GitRepoURL: !Ref GithubLink
+        #GitRepoURL: !Ref GithubLink
+        GitRepoURL: !Ref DeployRepo
         ImageTag: !Ref ImageTag
-        GitBranch: !Ref GitBranch
+        #GitBranch: !Ref GitBranch
+        GitBranch: !Ref DeployBranch
       TimeoutInMinutes: 35
 Outputs:
   RedshiftClusterEndpoint:
