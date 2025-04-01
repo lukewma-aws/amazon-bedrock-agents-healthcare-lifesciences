@@ -43,8 +43,8 @@ Parameters:
   GitBranch:
     Type: String
     Description: The github branch to clone 
-    #Default: multi-agent-collaboration
-    Default: multi-agent-notebook
+    Default: multi-agent-collaboration
+    #Default: multi-agent-notebook
 
 Mappings:
   RegionMap:
