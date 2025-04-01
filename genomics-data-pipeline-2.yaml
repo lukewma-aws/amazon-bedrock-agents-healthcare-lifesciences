@@ -479,7 +479,7 @@ Resources:
   NotificationConfigurationFunction:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: !Sub "notification-config-function-${Environment}"
+      FunctionName: !Sub "s3-notification-config-${Environment}"
       Handler: index.handler
       Role: !GetAtt NotificationConfigurationRole.Arn
       Code:
@@ -488,64 +488,50 @@ Resources:
           import json
           import logging
           from botocore.exceptions import ClientError
-          
+          import cfnresponse
+
           # Set up logging
           logger = logging.getLogger()
           logger.setLevel(logging.INFO)
-          
-          def send_response(event, context, response_status, response_data):
-              response_body = {
-                  'Status': response_status,
-                  'Reason': f'See the details in CloudWatch Log Stream: {context.log_stream_name}',
-                  'PhysicalResourceId': context.log_stream_name,
-                  'StackId': event['StackId'],
-                  'RequestId': event['RequestId'],
-                  'LogicalResourceId': event['LogicalResourceId'],
-                  'Data': response_data
-              }
-              
-              logger.info(f'Response body: {json.dumps(response_body)}')
-              
-              response_url = event['ResponseURL']
-              
-              try:
-                  import urllib3
-                  http = urllib3.PoolManager()
-                  response = http.request(
-                      'PUT',
-                      response_url,
-                      headers={'Content-Type': ''},
-                      body=json.dumps(response_body).encode('utf-8')
-                  )
-                  logger.info(f"CloudFormation response status code: {response.status}")
-                  return True
-              except Exception as e:
-                  logger.error(f"Failed to send response to CloudFormation: {str(e)}")
-                  return False
-          
+
           def handler(event, context):
               logger.info(f"Received event: {json.dumps(event)}")
               
               try:
+                  # Validate required properties
+                  properties = event.get('ResourceProperties', {})
+                  if 'BucketName' not in properties:
+                      return cfnresponse.send(event, context, cfnresponse.FAILED, 
+                          {'Error': 'Missing BucketName property'})
+                  
+                  bucket_name = properties['BucketName']
+                  s3 = boto3.client('s3')
+
                   if event['RequestType'] in ['Create', 'Update']:
-                      s3 = boto3.client('s3')
+                      if 'NotificationConfiguration' not in properties:
+                          return cfnresponse.send(event, context, cfnresponse.FAILED, 
+                              {'Error': 'Missing NotificationConfiguration property'})
                       
-                      bucket_name = event['ResourceProperties']['BucketName']
-                      notification_config = event['ResourceProperties']['NotificationConfiguration']
-                      
-                      logger.info(f"Configuring notifications for bucket: {bucket_name}")
-                      logger.info(f"Notification configuration: {json.dumps(notification_config)}")
+                      notification_config = properties['NotificationConfiguration']
                       
                       # Ensure the configuration is a dictionary
                       if isinstance(notification_config, str):
                           notification_config = json.loads(notification_config)
                       
+                      # Convert single Events string to list if needed
+                      if 'LambdaFunctionConfigurations' in notification_config:
+                          for config in notification_config['LambdaFunctionConfigurations']:
+                              if isinstance(config.get('Events'), str):
+                                  config['Events'] = [config['Events']]
+                      
                       # Add empty lists for other notification types if not present
                       full_config = {
                           'LambdaFunctionConfigurations': notification_config.get('LambdaFunctionConfigurations', []),
-                          'QueueConfigurations': [],
-                          'TopicConfigurations': []
+                          'QueueConfigurations': notification_config.get('QueueConfigurations', []),
+                          'TopicConfigurations': notification_config.get('TopicConfigurations', [])
                       }
+                      
+                      logger.info(f"Applying notification config: {json.dumps(full_config)}")
                       
                       try:
                           s3.put_bucket_notification_configuration(
@@ -553,17 +539,13 @@ Resources:
                               NotificationConfiguration=full_config
                           )
                           logger.info("Successfully configured bucket notifications")
-                          return send_response(event, context, 'SUCCESS', {})
+                          return cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
                       except ClientError as e:
-                          error_message = f"Failed to configure bucket notifications: {str(e)}"
-                          logger.error(error_message)
-                          return send_response(event, context, 'FAILED', {'Error': error_message})
+                          logger.error(f"Failed to configure bucket notifications: {str(e)}")
+                          return cfnresponse.send(event, context, cfnresponse.FAILED, 
+                              {'Error': str(e)})
                   
                   elif event['RequestType'] == 'Delete':
-                      # For delete, we'll remove all notifications
-                      s3 = boto3.client('s3')
-                      bucket_name = event['ResourceProperties']['BucketName']
-                      
                       try:
                           s3.put_bucket_notification_configuration(
                               Bucket=bucket_name,
@@ -574,20 +556,23 @@ Resources:
                               }
                           )
                           logger.info("Successfully removed bucket notifications")
-                          return send_response(event, context, 'SUCCESS', {})
+                          return cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
                       except ClientError as e:
-                          error_message = f"Failed to remove bucket notifications: {str(e)}"
-                          logger.error(error_message)
-                          return send_response(event, context, 'FAILED', {'Error': error_message})
+                          logger.error(f"Failed to remove bucket notifications: {str(e)}")
+                          return cfnresponse.send(event, context, cfnresponse.FAILED, 
+                              {'Error': str(e)})
                   
-                  return send_response(event, context, 'SUCCESS', {})
+                  return cfnresponse.send(event, context, cfnresponse.FAILED, 
+                      {'Error': f'Unknown RequestType: {event["RequestType"]}'})
               
               except Exception as e:
-                  error_message = f"Unexpected error: {str(e)}"
-                  logger.error(error_message)
-                  return send_response(event, context, 'FAILED', {'Error': error_message})
+                  logger.error(f"Unexpected error: {str(e)}")
+                  return cfnresponse.send(event, context, cfnresponse.FAILED, 
+                      {'Error': str(e)})
       Runtime: python3.9
-      Timeout: 30
+      Timeout: 300
+      MemorySize: 128
+
 
   NotificationConfigurationRole:
     Type: AWS::IAM::Role
