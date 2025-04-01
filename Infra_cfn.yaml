@@ -181,6 +181,7 @@ Resources:
   # VPC
   VPC:
     Type: AWS::EC2::VPC
+    DeletionPolicy: Delete
     Properties:
       CidrBlock: 10.0.0.0/16
       EnableDnsHostnames: true
@@ -190,6 +191,7 @@ Resources:
           Value: !Sub ${AWS::StackName}-VPC
   PrivateSubnet1:
     Type: AWS::EC2::Subnet
+    DeletionPolicy: Delete
     Properties:
       VpcId: !Ref VPC
       CidrBlock: 10.0.1.0/24
@@ -202,6 +204,7 @@ Resources:
           Value: !Sub ${AWS::StackName}-PrivateSubnet1
   PrivateSubnet2:
     Type: AWS::EC2::Subnet
+    DeletionPolicy: Delete
     Properties:
       VpcId: !Ref VPC
       CidrBlock: 10.0.2.0/24
@@ -214,6 +217,7 @@ Resources:
           Value: !Sub ${AWS::StackName}-PrivateSubnet2
   PublicSubnet1:
     Type: AWS::EC2::Subnet
+    DeletionPolicy: Delete
     Properties:
       VpcId: !Ref VPC
       CidrBlock: 10.0.3.0/24
@@ -227,15 +231,18 @@ Resources:
           Value: !Sub ${AWS::StackName}-PublicSubnet1
   NatGatewayEIP:
     Type: AWS::EC2::EIP
+    DeletionPolicy: Delete
     Properties:
       Domain: vpc
   NatGateway:
     Type: AWS::EC2::NatGateway
+    DeletionPolicy: Delete
     Properties:
       AllocationId: !GetAtt NatGatewayEIP.AllocationId
       SubnetId: !Ref PublicSubnet1
   PrivateRouteTable:
     Type: AWS::EC2::RouteTable
+    DeletionPolicy: Delete
     Properties:
       VpcId: !Ref VPC
       Tags:

@@ -919,6 +919,8 @@ Resources:
                     
   SageMakerDomain:
     Type: AWS::SageMaker::Domain
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
     Properties:
       DomainName: !Sub ${EnvironmentName}-domain
       AuthMode: IAM
@@ -942,7 +944,7 @@ Resources:
       AppName: default
       AppType: JupyterServer
       DomainId: !Ref SageMakerDomain
-      UserProfileName: !Ref SageMakerUserProfile
+      UserProfileName: !Sub ${EnvironmentName}-user
 
   TriggerBuildLambda:
     Type: AWS::Lambda::Function
@@ -1099,7 +1101,7 @@ Resources:
                 Action:
                   - bedrock:*
                 Resource: 
-                  - arn:aws:bedrock:*::foundation-model/*
+                  - !Sub arn:aws:bedrock:*::foundation-model/*
                   - !Sub arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/*
                   - !Sub arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent-alias/*
                   - !Sub arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent/*
