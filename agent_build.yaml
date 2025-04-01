@@ -385,7 +385,7 @@ Resources:
     Properties:
       ServiceToken: !GetAtt SageMakerDomainCleanupFunction.Arn
       DomainId: !Ref SageMakerDomain
-      VpcId: !Ref VPC
+      VpcId: !Ref VpcId
   
   S3Bucket: 
      Type: AWS::S3::Bucket
