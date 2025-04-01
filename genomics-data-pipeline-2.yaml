@@ -208,6 +208,36 @@ Resources:
               Bool:
                 aws:SecureTransport: false
 
+  FallbackBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FallbackBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowOmicsAccess
+            Effect: Allow
+            Principal:
+              Service: omics.amazonaws.com
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:ListBucket
+              - s3:DeleteObject
+            Resource:
+              - !Sub "arn:aws:s3:::${FallbackBucket}"
+              - !Sub "arn:aws:s3:::${FallbackBucket}/*"
+          - Sid: EnforceEncryptedTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !Sub "arn:aws:s3:::${FallbackBucket}"
+              - !Sub "arn:aws:s3:::${FallbackBucket}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
   #####################################
   # HealthOmics Resources
   #####################################
