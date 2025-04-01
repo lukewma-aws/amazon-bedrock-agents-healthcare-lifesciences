@@ -479,7 +479,7 @@ Resources:
   NotificationConfigurationFunction:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: !Sub "s3-notification-config-${Environment}"
+      FunctionName: !Sub "notification-config-function-${Environment}"
       Handler: index.handler
       Role: !GetAtt NotificationConfigurationRole.Arn
       Code:
