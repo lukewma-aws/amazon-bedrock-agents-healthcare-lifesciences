@@ -1129,11 +1129,12 @@ Resources:
 
   JupyterServerApp:
     Type: AWS::SageMaker::App
+    DependsOn: SageMakerUserProfile
     Properties:
       AppName: default
       AppType: JupyterServer
       DomainId: !Ref SageMakerDomain
-      UserProfileName: !Sub ${EnvironmentName}-user
+      UserProfileName: !Ref SageMakerUserProfile
 
   TriggerBuildLambda:
     Type: AWS::Lambda::Function
