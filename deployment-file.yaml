@@ -3,7 +3,3 @@ parameters:
   BedrockModelId: amazon.nova-lite-v1:0
   EnvironmentName: test1
   MultiAgentDevMode: true
-
-tags:
-  Name: 'genovia-notebook-gitsync'
-  Project: 'Demo'
