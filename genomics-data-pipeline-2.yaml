@@ -37,6 +37,7 @@ Resources:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
+      ObjectLockEnabled: true
 
   FallbackBucket:
     Type: AWS::S3::Bucket
@@ -54,6 +55,7 @@ Resources:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
+      ObjectLockEnabled: true
 
   TestWorkshopBucket:
     Type: AWS::S3::Bucket
@@ -88,6 +90,7 @@ Resources:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
+      ObjectLockEnabled: true
 
   #####################################
   # IAM Roles
@@ -170,8 +173,6 @@ Resources:
   InputBucketPolicy:
     Type: AWS::S3::BucketPolicy
     DependsOn: 
-      - InputBucket
-      - S3ToSequenceStoreLambdaRole
     Properties:
       Bucket: !Ref InputBucket
       PolicyDocument:
@@ -230,7 +231,6 @@ Resources:
     Type: AWS::Omics::SequenceStore
     DependsOn: 
       - InputBucket
-      - FallbackBucket
       - HealthOmicsRole
     Properties:
       Name: !Sub "workflow_sequence_store_${AWS::AccountId}_${Environment}"
@@ -241,7 +241,6 @@ Resources:
     Type: AWS::Omics::SequenceStore
     DependsOn:
       - InputBucket
-      - TestWorkshopBucket
       - HealthOmicsRole
     Properties:
       Name: !Sub "test_workshop_sequence_store_${AWS::AccountId}_${Environment}"
@@ -252,7 +251,6 @@ Resources:
     Type: AWS::Omics::VariantStore
     DependsOn: 
       - InputBucket
-      - DefaultReferenceStore
     Properties:
       Name: !Sub "variant_store_${AWS::AccountId}_${Environment}"
       Description: !Sub "Variant Store for account ${AWS::AccountId} in ${Environment} environment"
@@ -269,7 +267,7 @@ Resources:
       - InputBucket
       - S3ToSequenceStoreLambdaRole
     Properties:
-      FunctionName: !Sub s3toSequenceStoreTriggerFunction
+      FunctionName: s3toSequenceStoreTriggerFunction
       Handler: lambda_function.lambda_handler
       Role: !GetAtt S3ToSequenceStoreLambdaRole.Arn
       Runtime: python3.13
@@ -389,7 +387,6 @@ Resources:
 
   NotificationConfigurationFunction:
     Type: AWS::Lambda::Function
-    DependsOn: NotificationConfigurationRole
     Properties:
       FunctionName: !Sub "notification-config-function-${Environment}"
       Handler: index.handler
@@ -529,10 +526,7 @@ Resources:
   NotificationConfiguration:
     Type: Custom::S3BucketNotification
     DependsOn:
-      - InputBucket
-      - S3ToSequenceStoreTriggerFunction
       - S3InvokeLambdaPermission
-      - NotificationConfigurationFunction
     Properties:
       ServiceToken: !GetAtt NotificationConfigurationFunction.Arn
       BucketName: !Ref InputBucket
