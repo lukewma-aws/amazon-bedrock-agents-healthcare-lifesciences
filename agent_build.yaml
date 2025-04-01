@@ -484,6 +484,8 @@ Resources:
                 - echo "downloading Ncbi article for KB ingestion"
                 - yum install -y wget
                 - python -m pip install --upgrade pip
+                - echo "Cloning Git repository..."
+                - git clone -b ${GitBranch} --single-branch ${GitRepoURL} repo
                
             build:
               commands:
@@ -493,8 +495,6 @@ Resources:
                 - echo "Uploading NCBI article to S3..."
                 - aws s3 cp ncbi_article.pdf s3://${S3Bucket}/ncbi_article.pdf
                 - echo "NCBI article uploaded to S3"
-                - echo "Cloning Git repository..."
-                - git clone -b ${GitBranch} --single-branch ${GitRepoURL} repo
                 - echo "Zipping Lambda function..."
                 - cd ActionGroups/matplotbarchartlambda
                 - echo "Creating list of items to zip..."
@@ -569,11 +569,11 @@ Resources:
                 - echo "Logging into Amazon ECR..."
                 - aws ecr get-login-password --region ${AWS::Region} | docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
                 - echo "ECR login complete"
+                - echo "Cloning Git repository..."
+                - git clone -b ${GitBranch} --single-branch ${GitRepoURL} repo
             build:
               commands:
                 - echo "Starting build phase"
-                - echo "Cloning Git repository..."
-                - git clone -b ${GitBranch} --single-branch ${GitRepoURL} repo
                 - cd repo/ActionGroups/scientific-plots-with-lifelines
                 - echo "Building Docker image..."
                 - docker build -t lifelines-python3.12-v2 .
