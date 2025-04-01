@@ -237,6 +237,71 @@ Resources:
             Condition:
               Bool:
                 aws:SecureTransport: false
+    TestWorkshopBucketPolicy:
+    DependsOn: 
+      - TestWorkshopBucket
+      - HealthOmicsRole
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref TestWorkshopBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowOmicsRoleAccess
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt HealthOmicsRole.Arn
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:ListBucket
+            Resource:
+              - !Sub "arn:aws:s3:::${TestWorkshopBucket}"
+              - !Sub "arn:aws:s3:::${TestWorkshopBucket}/*"
+          - Sid: EnforceEncryptedTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !Sub "arn:aws:s3:::${TestWorkshopBucket}"
+              - !Sub "arn:aws:s3:::${TestWorkshopBucket}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+
+  WorkflowOutputBucketPolicy:
+    DependsOn: 
+      - WorkflowOutputBucket
+      - HealthOmicsRole
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WorkflowOutputBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowOmicsRoleAccess
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt HealthOmicsRole.Arn
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:ListBucket
+            Resource:
+              - !Sub "arn:aws:s3:::${WorkflowOutputBucket}"
+              - !Sub "arn:aws:s3:::${WorkflowOutputBucket}/*"
+          - Sid: EnforceEncryptedTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !Sub "arn:aws:s3:::${WorkflowOutputBucket}"
+              - !Sub "arn:aws:s3:::${WorkflowOutputBucket}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
 
   #####################################
   # HealthOmics Resources
