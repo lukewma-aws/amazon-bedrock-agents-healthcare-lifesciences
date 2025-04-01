@@ -625,8 +625,8 @@ Resources:
       BucketName: !Ref InputBucket
       NotificationConfiguration:
         LambdaFunctionConfigurations:
-          - Event: s3:ObjectCreated:*
-            Function: !GetAtt S3ToSequenceStoreTriggerFunction.Arn
+          - Events: s3:ObjectCreated:*
+            LambdaFunctionArn: !GetAtt S3ToSequenceStoreTriggerFunction.Arn
 
 Outputs:
   InputBucketName:
