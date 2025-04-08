@@ -572,6 +572,8 @@ Resources:
       Runtime: python3.9
       Timeout: 300
       MemorySize: 128
+    DependsOn:
+         - S3ToSequenceStoreTriggerFunction
 
 
   NotificationConfigurationRole:
