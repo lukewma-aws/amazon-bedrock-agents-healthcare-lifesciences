@@ -90,7 +90,7 @@ Resources:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
-      ObjectLockEnabled: true
+      #ObjectLockEnabled: true
 
   #####################################
   # IAM Roles
