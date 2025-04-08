@@ -328,6 +328,7 @@ Resources:
     DependsOn: 
       - InputBucket
       - HealthOmicsRole
+      - FallbackBucket
     Properties:
       Name: !Sub "workflow_sequence_store_${AWS::AccountId}_${Environment}"
       Description: !Sub "Workflow sequence store for account ${AWS::AccountId} in ${Environment} environment"
@@ -337,6 +338,7 @@ Resources:
     Type: AWS::Omics::SequenceStore
     DependsOn:
       - InputBucket
+      - FallbackBucket
       - HealthOmicsRole
     Properties:
       Name: !Sub "test_workshop_sequence_store_${AWS::AccountId}_${Environment}"
