@@ -343,7 +343,7 @@ Resources:
     Properties:
       Name: !Sub "test_workshop_sequence_store_${AWS::AccountId}_${Environment}"
       Description: !Sub "Test workshop sequence store for account ${AWS::AccountId} in ${Environment} environment"
-      FallbackLocation: !Sub "s3://${TestWorkshopBucket}/fallback/"
+      FallbackLocation: !Sub "s3://${FallbackBucket}/fallback/"
 
   VariantStore:
     Type: AWS::Omics::VariantStore
