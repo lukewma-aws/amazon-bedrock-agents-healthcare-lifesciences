@@ -362,7 +362,7 @@ Resources:
     DependsOn: 
       - InputBucket
     Properties:
-      FunctionName: s3toSequenceStoreTriggerFunction
+      FunctionName: S3toSequenceStoreTriggerFunction
       Handler: lambda_function.lambda_handler
       Role: !GetAtt S3ToSequenceStoreLambdaRole.Arn
       Runtime: python3.13
