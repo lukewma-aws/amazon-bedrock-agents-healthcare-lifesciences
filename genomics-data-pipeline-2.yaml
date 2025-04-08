@@ -37,7 +37,7 @@ Resources:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
-      ObjectLockEnabled: true
+      #ObjectLockEnabled: true
 
   FallbackBucket:
     Type: AWS::S3::Bucket
@@ -55,7 +55,7 @@ Resources:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
-      ObjectLockEnabled: true
+      #ObjectLockEnabled: true
 
   TestWorkshopBucket:
     Type: AWS::S3::Bucket
