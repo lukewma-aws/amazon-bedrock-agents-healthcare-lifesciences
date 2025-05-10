@@ -1,0 +1,5 @@
+template-file-path: ./Infra_cfn.yaml
+parameters:
+  BedrockModelId: amazon.nova-lite-v1:0
+  EnvironmentName: test1
+  MultiAgentDevMode: true

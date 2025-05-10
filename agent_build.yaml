@@ -22,6 +22,7 @@ Parameters:
   GitRepoURL:
     Type: String
     Default: 'https://github.com/aws-samples/amazon-bedrock-agents-cancer-biomarker-discovery.git'
+    #Default: 'https://github.com/lukewma-aws/amazon-bedrock-agents-healthcare-lifesciences.git'
     Description: Git repository URL where the code files are stored
   ImageTag:
     Type: String
@@ -31,17 +32,22 @@ Parameters:
     Type: String
     Default: nmcicollection
     Description: Name of the vector store/collection
-  IndexName:
-    Type: String
-    Default: vector-index
-    Description: Name of the vector index to be created
   GitBranch:
     Type: String
     Description: The github branch to clone
     Default: multi-agent-collaboration
+    #Default: multi-agent-notebook
   SubAgentS3Bucket:
     Type: String
     Description: 'The S3 bucket containing the Subagents'
+  VpcSubnetId:
+    Type: String
+    Description: ID of the subnet for SageMaker Domain
+    NoEcho: true
+  VpcId:
+    Type: String
+    Description: ID of the vpc for SageMaker Domain
+    NoEcho: true
     
 
 
@@ -185,15 +191,201 @@ Resources:
 
   CleanupCustomResource:
     Type: Custom::Cleanup
-    DependsOn: 
-      - S3Bucket
-      - ECRRepository
     Properties:
       ServiceToken: !GetAtt CleanupLambdaFunction.Arn
       ECRRepositoryName: !Ref ECRRepository
       S3BucketName: !Ref S3Bucket
       LogBucketName: !Ref LogBucket
   
+  SageMakerDomainCleanupFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt SageMakerDomainCleanupRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+          import time
+
+          def handler(event, context):
+              if event['RequestType'] == 'Delete':
+                  sm = boto3.client('sagemaker')
+                  ec2 = boto3.client('ec2')
+                  efs = boto3.client('efs')
+                  domain_id = event['ResourceProperties']['DomainId']
+                  vpc_id = event['ResourceProperties']['VpcId']
+                  
+                  try:
+                      # Get domain details to find EFS and ENIs
+                      try:
+                          domain = sm.describe_domain(DomainId=domain_id)
+                          domain_efs_id = domain['HomeEfsFileSystemId']
+                          
+                          # Find ENIs associated with the domain
+                          enis = ec2.describe_network_interfaces(
+                              Filters=[
+                                  {
+                                      'Name': 'vpc-id',
+                                      'Values': [vpc_id]
+                                  },
+                                  {
+                                      'Name': 'description',
+                                      'Values': [f'*SageMaker*{domain_id}*']
+                                  }
+                              ]
+                          )['NetworkInterfaces']
+                      except sm.exceptions.ResourceNotFound:
+                          print("Domain not found, might be already deleted")
+                          domain_efs_id = None
+                          enis = []
+
+                      # Delete all apps
+                      try:
+                          apps = sm.list_apps(DomainIdEquals=domain_id)['Apps']
+                          for app in apps:
+                              print(f"Deleting app: {app['AppName']}")
+                              sm.delete_app(
+                                  DomainId=domain_id,
+                                  UserProfileName=app['UserProfileName'],
+                                  AppType=app['AppType'],
+                                  AppName=app['AppName']
+                              )
+                              
+                          # Wait for apps to be deleted
+                          while True:
+                              apps = sm.list_apps(DomainIdEquals=domain_id)['Apps']
+                              if not apps:
+                                  break
+                              time.sleep(30)
+                      except sm.exceptions.ResourceNotFound:
+                          print("No apps found")
+                      
+                      # Delete all user profiles
+                      try:
+                          user_profiles = sm.list_user_profiles(DomainIdEquals=domain_id)['UserProfiles']
+                          for profile in user_profiles:
+                              print(f"Deleting user profile: {profile['UserProfileName']}")
+                              sm.delete_user_profile(
+                                  DomainId=domain_id,
+                                  UserProfileName=profile['UserProfileName']
+                              )
+                              
+                          # Wait for user profiles to be deleted
+                          while True:
+                              profiles = sm.list_user_profiles(DomainIdEquals=domain_id)['UserProfiles']
+                              if not profiles:
+                                  break
+                              time.sleep(30)
+                      except sm.exceptions.ResourceNotFound:
+                          print("No user profiles found")
+                      
+                      # Delete the domain
+                      try:
+                          print(f"Deleting domain: {domain_id}")
+                          sm.delete_domain(DomainId=domain_id)
+                          
+                          # Wait for domain deletion to complete
+                          while True:
+                              try:
+                                  sm.describe_domain(DomainId=domain_id)
+                                  time.sleep(30)
+                              except sm.exceptions.ResourceNotFound:
+                                  break
+                      except sm.exceptions.ResourceNotFound:
+                          print("Domain already deleted")
+
+                      # Delete ENIs
+                      for eni in enis:
+                          try:
+                              print(f"Deleting ENI: {eni['NetworkInterfaceId']}")
+                              ec2.delete_network_interface(NetworkInterfaceId=eni['NetworkInterfaceId'])
+                          except Exception as e:
+                              print(f"Error deleting ENI {eni['NetworkInterfaceId']}: {str(e)}")
+                      
+                      # Delete EFS
+                      if domain_efs_id:
+                          try:
+                              # Delete mount targets first
+                              mount_targets = efs.describe_mount_targets(FileSystemId=domain_efs_id)['MountTargets']
+                              for mount_target in mount_targets:
+                                  print(f"Deleting mount target: {mount_target['MountTargetId']}")
+                                  efs.delete_mount_target(MountTargetId=mount_target['MountTargetId'])
+                              
+                              # Wait for mount targets to be deleted
+                              while True:
+                                  try:
+                                      mount_targets = efs.describe_mount_targets(FileSystemId=domain_efs_id)['MountTargets']
+                                      if not mount_targets:
+                                          break
+                                      time.sleep(30)
+                                  except efs.exceptions.FileSystemNotFound:
+                                      break
+                              
+                              # Delete the EFS
+                              print(f"Deleting EFS: {domain_efs_id}")
+                              efs.delete_file_system(FileSystemId=domain_efs_id)
+                          except Exception as e:
+                              print(f"Error deleting EFS {domain_efs_id}: {str(e)}")
+                      
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                  except Exception as e:
+                      print(f"Error: {str(e)}")
+                      cfnresponse.send(event, context, cfnresponse.FAILED, {"Error": str(e)})
+              else:
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+
+      Runtime: python3.8
+      Timeout: 900
+
+  SageMakerDomainCleanupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SageMakerDomainCleanup
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sagemaker:ListApps
+                  - sagemaker:DeleteApp
+                  - sagemaker:ListUserProfiles
+                  - sagemaker:DeleteUserProfile
+                  - sagemaker:DeleteDomain
+                  - sagemaker:DescribeDomain
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - elasticfilesystem:DeleteFileSystem
+                  - elasticfilesystem:DeleteMountTarget
+                  - elasticfilesystem:DescribeMountTargets
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+
+  SageMakerDomainCleanup:
+    Type: Custom::SageMakerDomainCleanup
+    Properties:
+      ServiceToken: !GetAtt SageMakerDomainCleanupFunction.Arn
+      DomainId: !Ref SageMakerDomain
+      VpcId: !Ref VpcId
   
   S3Bucket: 
      Type: AWS::S3::Bucket
@@ -292,6 +484,8 @@ Resources:
                 - echo "downloading Ncbi article for KB ingestion"
                 - yum install -y wget
                 - python -m pip install --upgrade pip
+                - echo "Cloning Git repository..."
+                - git clone -b ${GitBranch} --single-branch ${GitRepoURL} repo
                
             build:
               commands:
@@ -301,8 +495,6 @@ Resources:
                 - echo "Uploading NCBI article to S3..."
                 - aws s3 cp ncbi_article.pdf s3://${S3Bucket}/ncbi_article.pdf
                 - echo "NCBI article uploaded to S3"
-                - echo "Cloning Git repository..."
-                - git clone -b ${GitBranch} --single-branch ${GitRepoURL} repo
                 - echo "Zipping Lambda function..."
                 - cd ActionGroups/matplotbarchartlambda
                 - echo "Creating list of items to zip..."
@@ -377,11 +569,11 @@ Resources:
                 - echo "Logging into Amazon ECR..."
                 - aws ecr get-login-password --region ${AWS::Region} | docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
                 - echo "ECR login complete"
+                - echo "Cloning Git repository..."
+                - git clone -b ${GitBranch} --single-branch ${GitRepoURL} repo
             build:
               commands:
                 - echo "Starting build phase"
-                - echo "Cloning Git repository..."
-                - git clone -b ${GitBranch} --single-branch ${GitRepoURL} repo
                 - cd repo/ActionGroups/scientific-plots-with-lifelines
                 - echo "Building Docker image..."
                 - docker build -t lifelines-python3.12-v2 .
@@ -815,6 +1007,13 @@ Resources:
             Principal:
               Service: sagemaker.amazonaws.com
             Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonBedrockFullAccess
+        - arn:aws:iam::aws:policy/IAMFullAccess
+        - arn:aws:iam::aws:policy/AmazonSSMFullAccess
+        - arn:aws:iam::aws:policy/AWSLambda_FullAccess
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        - arn:aws:iam::aws:policy/AmazonAthenaFullAccess
       Policies:
         - PolicyName: SageMakerProcessingAccess
           PolicyDocument:
@@ -906,6 +1105,37 @@ Resources:
                 Condition:
                   StringEquals:
                     'aws:RequestedRegion': !Ref 'AWS::Region'
+                    
+  SageMakerDomain:
+    Type: AWS::SageMaker::Domain
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      DomainName: !Sub ${EnvironmentName}-domain
+      AuthMode: IAM
+      DefaultUserSettings:
+        ExecutionRole: !GetAtt SageMakerExecutionRole.Arn
+      SubnetIds:
+      - !Ref VpcSubnetId
+      VpcId: !Ref VpcId
+
+  SageMakerUserProfile:
+    Type: AWS::SageMaker::UserProfile
+    Properties:
+      DomainId: !Ref SageMakerDomain
+      UserProfileName: !Sub ${EnvironmentName}-user
+      UserSettings:
+        ExecutionRole: !GetAtt SageMakerExecutionRole.Arn
+
+  JupyterServerApp:
+    Type: AWS::SageMaker::App
+    DependsOn: SageMakerUserProfile
+    Properties:
+      AppName: default
+      AppType: JupyterServer
+      DomainId: !Ref SageMakerDomain
+      UserProfileName: !Ref SageMakerUserProfile
+
   TriggerBuildLambda:
     Type: AWS::Lambda::Function
     Properties:
@@ -1020,21 +1250,18 @@ Resources:
   
   TriggerBuildCustomResource:
     Type: Custom::TriggerBuild
-    DependsOn: DockerPushLogic
     Properties:
       ServiceToken: !GetAtt TriggerBuildLambda.Arn
       ProjectName: !Ref DockerPushLogic
   
   TriggerImagingDockerBuild:
     Type: Custom::TriggerBuild
-    DependsOn: ImagingDockerBuildProject
     Properties:
       ServiceToken: !GetAtt TriggerBuildLambda.Arn
       ProjectName: !Ref ImagingDockerBuildProject
   
   TriggerDataRetrievalLogic:
     Type: Custom::TriggerBuild
-    DependsOn: DataRetrievalLogic
     Properties:
       ServiceToken: !GetAtt TriggerBuildLambda.Arn
       ProjectName: !Ref DataRetrievalLogic
@@ -1217,6 +1444,7 @@ Resources:
                   - ecr:SetRepositoryPolicy  
                 Resource:
                   - !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/*
+                  - !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:*
                   - !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/medical-image-processing-smstudio
         - PolicyName: CreateServiceLinkedRole
           PolicyDocument:
@@ -1489,3 +1717,4 @@ Resources:
         AgentRole: !GetAtt AgentRole.Arn
         BedrockModelId: !Ref BedrockModelId
       TimeoutInMinutes: 30
+

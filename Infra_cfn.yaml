@@ -28,7 +28,8 @@ Parameters:
   GithubLink:
    Type: String
    Description: 'The link to the agent build cloudformation stack'
-   Default: 'https://github.com/aws-samples/amazon-bedrock-agents-cancer-biomarker-discovery.git'
+   #Default: 'https://github.com/aws-samples/amazon-bedrock-agents-cancer-biomarker-discovery.git'
+   Default: 'https://github.com/lukewma-aws/amazon-bedrock-agents-healthcare-lifesciences.git'
   ImageTag:
     Type: String
     Default: latest
@@ -42,8 +43,16 @@ Parameters:
   GitBranch:
     Type: String
     Description: The github branch to clone 
-    Default: multi-agent-collaboration
-
+    #Default: multi-agent-collaboration
+    Default: multi-agent-notebook
+  DeployBranch:
+    Type: String
+    Description: The branch to deploy from
+    Default: multi-agent-notebook
+  DeployRepo:
+    Type: String
+    Description: The repo to deploy from
+    Default: 'https://github.com/lukewma-aws/amazon-bedrock-agents-healthcare-lifesciences.git'
 
 Mappings:
   RegionMap:
@@ -79,7 +88,7 @@ Resources:
       MasterUserPassword: !Ref RedshiftPassword
       ClusterType: single-node
       PubliclyAccessible: false
-      VpcSecurityGroupIds: [!Ref SecurityGroup]
+      VpcSecurityGroupIds: [!Ref RedshiftSecurityGroup]
       ClusterSubnetGroupName: !Ref RedshiftSubnetGroup
       ClusterParameterGroupName: !Ref RedshiftClusterParameterGroup
       Encrypted: true
@@ -134,14 +143,27 @@ Resources:
           PASSWORD: !Ref RedshiftPassword
         PhysicalConnectionRequirements:
           SubnetId: !Ref PrivateSubnet1
-          SecurityGroupIdList: [!Ref SecurityGroup]
+          SecurityGroupIdList: [!Ref RedshiftSecurityGroup]
           AvailabilityZone: !Select 
             - 0
             - !GetAZs 
               Ref: 'AWS::Region'
 
-  
-  SecurityGroup:
+  SageMakerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for SageMaker Domain
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 10.0.0.0/16  # Only allow access from within VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-sagemaker-sg
+
+  RedshiftSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: Security group for Redshift cluster
@@ -167,6 +189,7 @@ Resources:
   # VPC
   VPC:
     Type: AWS::EC2::VPC
+    DeletionPolicy: Delete
     Properties:
       CidrBlock: 10.0.0.0/16
       EnableDnsHostnames: true
@@ -176,6 +199,7 @@ Resources:
           Value: !Sub ${AWS::StackName}-VPC
   PrivateSubnet1:
     Type: AWS::EC2::Subnet
+    DeletionPolicy: Delete
     Properties:
       VpcId: !Ref VPC
       CidrBlock: 10.0.1.0/24
@@ -188,6 +212,7 @@ Resources:
           Value: !Sub ${AWS::StackName}-PrivateSubnet1
   PrivateSubnet2:
     Type: AWS::EC2::Subnet
+    DeletionPolicy: Delete
     Properties:
       VpcId: !Ref VPC
       CidrBlock: 10.0.2.0/24
@@ -200,6 +225,7 @@ Resources:
           Value: !Sub ${AWS::StackName}-PrivateSubnet2
   PublicSubnet1:
     Type: AWS::EC2::Subnet
+    DeletionPolicy: Delete
     Properties:
       VpcId: !Ref VPC
       CidrBlock: 10.0.3.0/24
@@ -213,15 +239,18 @@ Resources:
           Value: !Sub ${AWS::StackName}-PublicSubnet1
   NatGatewayEIP:
     Type: AWS::EC2::EIP
+    DeletionPolicy: Delete
     Properties:
       Domain: vpc
   NatGateway:
     Type: AWS::EC2::NatGateway
+    DeletionPolicy: Delete
     Properties:
       AllocationId: !GetAtt NatGatewayEIP.AllocationId
       SubnetId: !Ref PublicSubnet1
   PrivateRouteTable:
     Type: AWS::EC2::RouteTable
+    DeletionPolicy: Delete
     Properties:
       VpcId: !Ref VPC
       Tags:
@@ -578,7 +607,8 @@ Resources:
                   - 'ec2:DescribeSubnets'
                   - 'ec2:DescribeVpcs'
                 Resource:
-                  - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:security-group/${SecurityGroup}'
+                  - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:security-group/${RedshiftSecurityGroup}'
+                  - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:security-group/${SageMakerSecurityGroup}'
                   - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:subnet/${PrivateSubnet1}'
                   - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:subnet/${PrivateSubnet2}'
                   - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:vpc/${VPC}'
@@ -1103,9 +1133,6 @@ Resources:
                   - !Sub arn:aws:s3:::${S3Bucket}
                   - !Sub arn:aws:s3:::${S3Bucket}/*
   
-
-
-  
   AgentandUICodeBuild:
     Type: AWS::CodeBuild::Project
     Properties:
@@ -1161,8 +1188,11 @@ Resources:
         BedrockModelId: !Ref BedrockModelId
         MultiAgentDevMode: !Ref MultiAgentDevMode
         EnvironmentName: !Ref EnvironmentName
-        GitBranch: !Ref GitBranch
+        #GitBranch: !Ref GitBranch
+        GitBranch: !Ref DeployBranch
         SubAgentS3Bucket: !Ref S3Bucket
+        VpcSubnetId: !Ref PrivateSubnet1       
+        VpcId: !Ref VPC
       TimeoutInMinutes: 30
   StreamlitBuildNestedStack:
     Type: AWS::CloudFormation::Stack
@@ -1172,9 +1202,11 @@ Resources:
       TemplateURL: !Sub https://${S3Bucket}.s3.${AWS::Region}.amazonaws.com/packaged_streamlit_build.yaml
       Parameters:
         EnvironmentName: !Ref EnvironmentName
-        GitRepoURL: !Ref GithubLink
+        #GitRepoURL: !Ref GithubLink
+        GitRepoURL: !Ref DeployRepo
         ImageTag: !Ref ImageTag
-        GitBranch: !Ref GitBranch
+        #GitBranch: !Ref GitBranch
+        GitBranch: !Ref DeployBranch
       TimeoutInMinutes: 35
 Outputs:
   RedshiftClusterEndpoint:
