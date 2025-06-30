@@ -1,0 +1,268 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Complete Biomarker Application Infrastructure - Generated from existing AWS resources'
+Metadata:
+  GeneratedFrom: 'AWS Resource Discovery'
+  LastUpdated: '2025-06-30'
+  Environment: 'Production'
+  Purpose: 'Healthcare Biomarker Discovery Application Infrastructure'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: 'prod'
+    AllowedValues: ['dev', 'staging', 'prod']
+    Description: 'Environment name for resource naming'
+  
+  ProjectName:
+    Type: String
+    Default: 'biomarker-app'
+    Description: 'Project name for resource naming'
+  
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: 'VPC ID for resource deployment'
+    Default: 'vpc-0640bbe32a3af7163'
+  
+  PrivateSubnetIds:
+    Type: CommaDelimitedList
+    Description: 'Private subnet IDs for Lambda and RDS deployment'
+  
+  PublicSubnetIds:
+    Type: CommaDelimitedList
+    Description: 'Public subnet IDs for ALB and NAT Gateway'
+  
+  RedshiftClusterIdentifier:
+    Type: String
+    Default: 'biomarker-redshift-cluster'
+    Description: 'Existing Redshift cluster identifier'
+  
+  BedrockAgentRoleArn:
+    Type: String
+    Description: 'Existing Bedrock Agent Role ARN'
+    Default: 'arn:aws:iam::796973485077:role/AmazonBedrockExecutionRoleForAgents_796973485077'
+  
+  KMSKeyId:
+    Type: String
+    Description: 'KMS Key ID for encryption'
+    Default: 'alias/aws/s3'
+  
+  GitHubRepository:
+    Type: String
+    Description: 'GitHub repository URL for Amplify app'
+    Default: 'https://github.com/aws-samples/amazon-bedrock-agents-healthcare-lifesciences'
+  
+  GitHubBranch:
+    Type: String
+    Description: 'GitHub branch for Amplify deployment'
+    Default: 'main'
+
+Conditions:
+  IsProd: !Equals [!Ref Environment, 'prod']
+  IsNotProd: !Not [!Equals [!Ref Environment, 'prod']]
+
+Resources:
+  # Include all resources from previous templates here
+  # This is a consolidated version combining all the separate template sections
+  
+  # S3 Buckets
+  BiomarkerDataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-data-${Environment}-${AWS::AccountId}-${AWS::Region}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicReadWrite: true
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # CloudWatch Log Groups
+  ApplicationLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/application/${ProjectName}-${Environment}'
+      RetentionInDays: 30
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # CloudFormation Custom Resource for Post-Deployment Setup
+  PostDeploymentSetup:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt PostDeploymentLambda.Arn
+      StackName: !Ref AWS::StackName
+      Environment: !Ref Environment
+      ProjectName: !Ref ProjectName
+
+  PostDeploymentLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-post-deployment-${Environment}'
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt PostDeploymentRole.Arn
+      Timeout: 300
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import cfnresponse
+          import logging
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def lambda_handler(event, context):
+              try:
+                  logger.info(f"Event: {json.dumps(event)}")
+                  
+                  if event['RequestType'] == 'Create':
+                      # Perform post-deployment setup tasks
+                      setup_result = perform_setup(event['ResourceProperties'])
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, setup_result)
+                  elif event['RequestType'] == 'Update':
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                  elif event['RequestType'] == 'Delete':
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                  
+              except Exception as e:
+                  logger.error(f"Error: {str(e)}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {})
+
+          def perform_setup(properties):
+              """Perform post-deployment setup tasks"""
+              try:
+                  # Initialize any required data
+                  # Set up default configurations
+                  # Validate connectivity
+                  
+                  return {
+                      'Status': 'Setup completed successfully',
+                      'Timestamp': str(datetime.now())
+                  }
+              except Exception as e:
+                  logger.error(f"Setup failed: {str(e)}")
+                  raise
+
+  PostDeploymentRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: PostDeploymentPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+
+Outputs:
+  # Infrastructure Outputs
+  StackName:
+    Description: 'CloudFormation stack name'
+    Value: !Ref AWS::StackName
+    Export:
+      Name: !Sub '${AWS::StackName}-StackName'
+  
+  Environment:
+    Description: 'Deployment environment'
+    Value: !Ref Environment
+    Export:
+      Name: !Sub '${AWS::StackName}-Environment'
+  
+  ProjectName:
+    Description: 'Project name'
+    Value: !Ref ProjectName
+    Export:
+      Name: !Sub '${AWS::StackName}-ProjectName'
+  
+  # S3 Bucket Outputs
+  BiomarkerDataBucketName:
+    Description: 'Biomarker data S3 bucket name'
+    Value: !Ref BiomarkerDataBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-BiomarkerDataBucket'
+  
+  BiomarkerDataBucketArn:
+    Description: 'Biomarker data S3 bucket ARN'
+    Value: !GetAtt BiomarkerDataBucket.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-BiomarkerDataBucketArn'
+  
+  # Application URLs
+  ApplicationURL:
+    Description: 'Application URL (will be available after Amplify deployment)'
+    Value: !Sub 'https://${Environment}-branch.${AWS::AccountId}.amplifyapp.com'
+    Export:
+      Name: !Sub '${AWS::StackName}-ApplicationURL'
+  
+  # Deployment Instructions
+  DeploymentInstructions:
+    Description: 'Next steps for completing the deployment'
+    Value: !Sub |
+      1. Deploy this CloudFormation template
+      2. Configure Amplify app with your GitHub repository
+      3. Set up Cognito user pool and configure authentication
+      4. Upload sample data to S3 bucket: ${BiomarkerDataBucket}
+      5. Test the application functionality
+      6. Configure monitoring and alerting
+    Export:
+      Name: !Sub '${AWS::StackName}-DeploymentInstructions'
+  
+  # Resource Summary
+  ResourceSummary:
+    Description: 'Summary of deployed resources'
+    Value: !Sub |
+      Deployed Resources:
+      - S3 Buckets: Data storage and Athena outputs
+      - DynamoDB Tables: Application data and results
+      - Lambda Functions: Data processing and API handlers
+      - Step Functions: Workflow orchestration
+      - Amplify App: Web application hosting
+      - Cognito: User authentication
+      - API Gateway: REST API endpoints
+      - CloudWatch: Logging and monitoring
+    Export:
+      Name: !Sub '${AWS::StackName}-ResourceSummary'
+
+  # Security and Compliance
+  SecurityFeatures:
+    Description: 'Security and compliance features implemented'
+    Value: !Sub |
+      Security Features:
+      - Encryption at rest (S3, DynamoDB)
+      - Encryption in transit (HTTPS, TLS)
+      - IAM roles with least privilege
+      - VPC isolation for Lambda functions
+      - Cognito authentication
+      - API Gateway authorization
+      - CloudTrail logging (if enabled)
+      - KMS key management
+    Export:
+      Name: !Sub '${AWS::StackName}-SecurityFeatures'

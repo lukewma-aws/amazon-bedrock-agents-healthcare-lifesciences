@@ -1,0 +1,386 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Creates the Clinical Evidence Researcher agent for retrieving and summarizing insights from scientific literature using PubMed APIs and Amazon Bedrock Knowledge Bases.
+
+Parameters:
+  AgentAliasName:
+    Type: String
+    Default: "Latest"
+    Description: Name for the agent alias
+  BedrockModelId:
+    Type: String
+    Description: The ID of the Foundation Model to use for the Agent
+    Default: us.anthropic.claude-3-5-sonnet-20241022-v2:0
+  AgentIAMRoleArn:
+    Type: String
+    Description: (Optional) Amazon Bedrock Agents service role ARN
+    Default: ""
+  KnowledgeBaseId:
+    Type: String
+    Description: (Optional) Knowledge Base ID for RAG functionality
+    Default: ""
+
+Conditions:
+  CreateAgentAliasCondition: !Not [!Equals [!Ref AgentAliasName, ""]]
+  AgentIAMRoleCondition: !Not [!Equals [!Ref AgentIAMRoleArn, ""]]
+  KnowledgeBaseCondition: !Not [!Equals [!Ref KnowledgeBaseId, ""]]
+
+Resources:
+  ########################
+  ##### PubMed Search #####
+  ########################
+
+  PubMedSearchLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: BedrockKnowledgeBaseAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:RetrieveAndGenerate
+                  - bedrock:Retrieve
+                Resource: "*"
+
+  PubMedSearchLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-pubmed-search"
+      RetentionInDays: 14
+
+  PubMedSearchLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-PubMedSearch"
+      Role: !GetAtt PubMedSearchLambdaRole.Arn
+      Runtime: python3.12
+      Handler: lambda_function.lambda_handler
+      Timeout: 60
+      MemorySize: 512
+      Environment:
+        Variables:
+          LOG_LEVEL: "INFO"
+          KNOWLEDGE_BASE_ID: !Ref KnowledgeBaseId
+      Code:
+        ZipFile: |
+          import json
+          import logging
+          import urllib.request
+          import urllib.parse
+          import xml.etree.ElementTree as ET
+          import os
+          import boto3
+          from typing import Dict, List, Any
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def lambda_handler(event, context):
+              """
+              Lambda function to search PubMed for biomedical literature
+              """
+              try:
+                  logger.info(f"Received event: {json.dumps(event)}")
+                  
+                  # Extract parameters from the event
+                  parameters = event.get('parameters', [])
+                  param_dict = {param['name']: param['value'] for param in parameters}
+                  
+                  query = param_dict.get('query', '')
+                  max_results = int(param_dict.get('max_results', 10))
+                  
+                  if not query:
+                      return {
+                          'response': {
+                              'actionGroupInvocationOutput': {
+                                  'text': 'Error: Query parameter is required'
+                              }
+                          }
+                      }
+                  
+                  # Search PubMed
+                  results = search_pubmed(query, max_results)
+                  
+                  return {
+                      'response': {
+                          'actionGroupInvocationOutput': {
+                              'text': json.dumps(results, indent=2)
+                          }
+                      }
+                  }
+                  
+              except Exception as e:
+                  logger.error(f"Error in lambda_handler: {str(e)}")
+                  return {
+                      'response': {
+                          'actionGroupInvocationOutput': {
+                              'text': f'Error processing request: {str(e)}'
+                          }
+                      }
+                  }
+
+          def search_pubmed(query: str, max_results: int = 10) -> Dict[str, Any]:
+              """
+              Search PubMed for articles matching the query
+              """
+              try:
+                  # URL encode the query
+                  encoded_query = urllib.parse.quote(query)
+                  
+                  # Search PubMed for article IDs
+                  search_url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term={encoded_query}&retmax={max_results}&retmode=xml"
+                  
+                  with urllib.request.urlopen(search_url) as response:
+                      search_data = response.read()
+                  
+                  # Parse XML response
+                  root = ET.fromstring(search_data)
+                  id_list = root.find('.//IdList')
+                  
+                  if id_list is None or len(id_list) == 0:
+                      return {
+                          'query': query,
+                          'total_results': 0,
+                          'articles': []
+                      }
+                  
+                  # Get article IDs
+                  article_ids = [id_elem.text for id_elem in id_list.findall('Id')]
+                  
+                  # Fetch article details
+                  if article_ids:
+                      ids_str = ','.join(article_ids)
+                      fetch_url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed&id={ids_str}&retmode=xml"
+                      
+                      with urllib.request.urlopen(fetch_url) as response:
+                          fetch_data = response.read()
+                      
+                      articles = parse_pubmed_articles(fetch_data)
+                  else:
+                      articles = []
+                  
+                  return {
+                      'query': query,
+                      'total_results': len(articles),
+                      'articles': articles
+                  }
+                  
+              except Exception as e:
+                  logger.error(f"Error searching PubMed: {str(e)}")
+                  return {
+                      'query': query,
+                      'error': str(e),
+                      'total_results': 0,
+                      'articles': []
+                  }
+
+          def parse_pubmed_articles(xml_data: bytes) -> List[Dict[str, Any]]:
+              """
+              Parse PubMed XML response to extract article information
+              """
+              articles = []
+              
+              try:
+                  root = ET.fromstring(xml_data)
+                  
+                  for article in root.findall('.//PubmedArticle'):
+                      try:
+                          # Extract PMID
+                          pmid_elem = article.find('.//PMID')
+                          pmid = pmid_elem.text if pmid_elem is not None else 'Unknown'
+                          
+                          # Extract title
+                          title_elem = article.find('.//ArticleTitle')
+                          title = title_elem.text if title_elem is not None else 'No title available'
+                          
+                          # Extract abstract
+                          abstract_elem = article.find('.//Abstract/AbstractText')
+                          abstract = abstract_elem.text if abstract_elem is not None else 'No abstract available'
+                          
+                          # Extract authors
+                          authors = []
+                          author_list = article.find('.//AuthorList')
+                          if author_list is not None:
+                              for author in author_list.findall('Author'):
+                                  last_name = author.find('LastName')
+                                  first_name = author.find('ForeName')
+                                  if last_name is not None and first_name is not None:
+                                      authors.append(f"{first_name.text} {last_name.text}")
+                          
+                          # Extract journal
+                          journal_elem = article.find('.//Journal/Title')
+                          journal = journal_elem.text if journal_elem is not None else 'Unknown journal'
+                          
+                          # Extract publication date
+                          pub_date = article.find('.//PubDate')
+                          pub_year = 'Unknown'
+                          if pub_date is not None:
+                              year_elem = pub_date.find('Year')
+                              if year_elem is not None:
+                                  pub_year = year_elem.text
+                          
+                          articles.append({
+                              'pmid': pmid,
+                              'title': title,
+                              'abstract': abstract,
+                              'authors': authors,
+                              'journal': journal,
+                              'publication_year': pub_year,
+                              'url': f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+                          })
+                          
+                      except Exception as e:
+                          logger.error(f"Error parsing individual article: {str(e)}")
+                          continue
+                  
+              except Exception as e:
+                  logger.error(f"Error parsing XML: {str(e)}")
+              
+              return articles
+
+  PubMedSearchLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt PubMedSearchLambdaFunction.Arn
+      Principal: bedrock.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !Sub arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent/*
+
+  #####################
+  ##### Agent #####
+  ###################
+
+  ClinicalEvidenceResearcherAgent:
+    Type: AWS::Bedrock::Agent
+    Properties:
+      ActionGroups:
+        - ActionGroupName: "UserInputAction"
+          ParentActionGroupSignature: "AMAZON.UserInput"
+          ActionGroupState: "ENABLED"
+        - ActionGroupName: PubMedSearch
+          Description: Search PubMed for biomedical literature and research articles
+          ActionGroupExecutor:
+            Lambda: !GetAtt PubMedSearchLambdaFunction.Arn
+          ActionGroupState: ENABLED
+          FunctionSchema:
+            Functions:
+              - Name: search_pubmed
+                Description: Search PubMed database for biomedical literature using keywords, topics, or research questions. Returns relevant articles with abstracts, authors, and publication details.
+                Parameters:
+                  query:
+                    Description: "Search query for PubMed (e.g., 'EGFR mutations lung cancer', 'biomarkers breast cancer', 'immunotherapy melanoma')"
+                    Type: string
+                    Required: True
+                  max_results:
+                    Description: "Maximum number of articles to return (default: 10, max: 50)"
+                    Type: integer
+                    Required: False
+      AgentName: "Clinical-Evidence-Researcher-Agent"
+      AgentResourceRoleArn:
+        "Fn::If":
+          - AgentIAMRoleCondition
+          - !Ref AgentIAMRoleArn
+          - "{{resolve:ssm:/bedrock/agent/role/arn:1}}"
+      AutoPrepare: True
+      Description: "Retrieves and summarizes insights from scientific literature using PubMed APIs and Amazon Bedrock Knowledge Bases for Retrieval Augmented Generation (RAG)"
+      FoundationModel: !Ref BedrockModelId
+      GuardrailConfiguration:
+        GuardrailIdentifier: !GetAtt ClinicalEvidenceGuardrail.GuardrailId
+        GuardrailVersion: !GetAtt ClinicalEvidenceGuardrail.Version
+      KnowledgeBases:
+        "Fn::If":
+          - KnowledgeBaseCondition
+          - - KnowledgeBaseId: !Ref KnowledgeBaseId
+              Description: "Internal literature evidence database"
+              KnowledgeBaseState: "ENABLED"
+          - !Ref "AWS::NoValue"
+      Instruction: |
+        You are a clinical evidence researcher specializing in biomedical literature analysis and evidence synthesis. Your role is to help users find, analyze, and summarize scientific evidence from published research literature.
+
+        You have access to the following tools:
+
+        - search_pubmed: Search the PubMed database for biomedical literature using keywords, topics, or research questions. This returns relevant articles with abstracts, authors, and publication details.
+        - Knowledge Base (if available): Access to internal literature evidence database for additional research context.
+
+        Research Process
+
+        1. Understand the user's research question or information need
+        2. Use search_pubmed to find relevant scientific literature from PubMed
+        3. Analyze and synthesize the retrieved articles to provide comprehensive answers
+        4. If available, supplement PubMed results with knowledge base information
+        5. Present findings in a structured, evidence-based format
+
+        Response Guidelines
+
+        - Provide scientifically accurate information based on peer-reviewed literature
+        - Cite specific studies with PMID numbers and publication details
+        - Summarize key findings and highlight important research trends
+        - Identify gaps in the literature when relevant
+        - Present conflicting evidence objectively when it exists
+        - Use appropriate medical and scientific terminology
+        - Structure responses with clear sections (e.g., Background, Key Findings, Clinical Implications)
+        - Always include relevant citations and publication years
+
+        Example Research Areas
+
+        - Cancer biomarkers and their clinical applications
+        - Drug efficacy and safety profiles
+        - Disease mechanisms and pathophysiology
+        - Treatment outcomes and comparative effectiveness
+        - Diagnostic methods and their accuracy
+        - Epidemiological trends and risk factors
+
+  AgentAliasResource:
+    Type: AWS::Bedrock::AgentAlias
+    Condition: CreateAgentAliasCondition
+    Properties:
+      AgentId: !GetAtt ClinicalEvidenceResearcherAgent.AgentId
+      AgentAliasName: !Ref AgentAliasName
+
+  ClinicalEvidenceGuardrail:
+    Type: AWS::Bedrock::Guardrail
+    Properties:
+      BlockedInputMessaging: "Sorry, your query violates our usage policies."
+      BlockedOutputsMessaging: "Sorry, I am unable to reply because the output violates our usage policies."
+      ContentPolicyConfig:
+        FiltersConfig:
+          - InputStrength: "HIGH"
+            OutputStrength: "HIGH"
+            Type: "MISCONDUCT"
+          - InputStrength: "HIGH"
+            OutputStrength: "NONE"
+            Type: "PROMPT_ATTACK"
+      Description: Guardrail for Clinical Evidence Researcher agent to block harmful content.
+      Name: ClinicalEvidenceResearcherGuardrail
+      WordPolicyConfig:
+        ManagedWordListsConfig:
+          - Type: PROFANITY
+
+Outputs:
+  AgentId:
+    Description: Agent ID
+    Value: !Ref ClinicalEvidenceResearcherAgent
+  AgentAliasId:
+    Description: Agent Alias ID
+    Value: !GetAtt AgentAliasResource.AgentAliasId
+    Condition: CreateAgentAliasCondition
+  AgentAliasArn:
+    Description: Agent Alias ARN
+    Value: !GetAtt AgentAliasResource.AgentAliasArn
+    Condition: CreateAgentAliasCondition
+  PubMedLambdaFunctionArn:
+    Description: PubMed Search Lambda Function ARN
+    Value: !GetAtt PubMedSearchLambdaFunction.Arn

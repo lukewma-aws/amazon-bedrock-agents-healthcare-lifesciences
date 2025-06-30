@@ -1,0 +1,383 @@
+  # ========================================
+  # AMPLIFY APPLICATION
+  # ========================================
+  
+  BiomarkerAmplifyApp:
+    Type: AWS::Amplify::App
+    Properties:
+      Name: !Sub '${ProjectName}-app-${Environment}'
+      Description: 'Biomarker Discovery Application - Healthcare AI Platform'
+      Repository: 'https://github.com/aws-samples/amazon-bedrock-agents-healthcare-lifesciences'
+      Platform: WEB
+      IAMServiceRole: !GetAtt AmplifyServiceRole.Arn
+      EnvironmentVariables:
+        - Name: AMPLIFY_DIFF_DEPLOY
+          Value: 'false'
+        - Name: AMPLIFY_MONOREPO_APP_ROOT
+          Value: 'ui'
+        - Name: _LIVE_UPDATES
+          Value: '[{"name":"Amplify CLI","pkg":"@aws-amplify/cli","type":"npm","version":"latest"}]'
+        - Name: REACT_APP_API_ENDPOINT
+          Value: !Sub 'https://${BiomarkerAPI}.execute-api.${AWS::Region}.amazonaws.com/${Environment}'
+        - Name: REACT_APP_BEDROCK_AGENT_ID
+          Value: 'UR5AFSSQXN'
+        - Name: REACT_APP_CLINICAL_AGENT_ID
+          Value: 'Q3Y7J9OP5Q'
+        - Name: REACT_APP_SUPERVISOR_AGENT_ID
+          Value: 'N6JRGX3Q0F'
+        - Name: REACT_APP_REGION
+          Value: !Ref AWS::Region
+        - Name: REACT_APP_USER_POOL_ID
+          Value: !Ref CognitoUserPool
+        - Name: REACT_APP_USER_POOL_CLIENT_ID
+          Value: !Ref CognitoUserPoolClient
+        - Name: REACT_APP_IDENTITY_POOL_ID
+          Value: !Ref CognitoIdentityPool
+      BuildSpec: |
+        version: 1
+        applications:
+          - appRoot: ui
+            frontend:
+              phases:
+                preBuild:
+                  commands:
+                    - npm ci
+                build:
+                  commands:
+                    - npm run build
+              artifacts:
+                baseDirectory: build
+                files:
+                  - '**/*'
+              cache:
+                paths:
+                  - node_modules/**/*
+      CustomRules:
+        - Source: '/<*>'
+          Target: '/index.html'
+          Status: '404-200'
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Purpose
+          Value: 'Healthcare biomarker discovery web application'
+
+  AmplifyBranch:
+    Type: AWS::Amplify::Branch
+    Properties:
+      AppId: !GetAtt BiomarkerAmplifyApp.AppId
+      BranchName: !Sub '${Environment}-branch'
+      Description: !Sub 'Main branch for ${Environment} environment'
+      EnableAutoBuild: true
+      EnablePullRequestPreview: false
+      EnvironmentVariables:
+        - Name: AMPLIFY_DIFF_DEPLOY
+          Value: 'false'
+        - Name: REACT_APP_ENV
+          Value: !Ref Environment
+      Stage: !If [IsProd, 'PRODUCTION', 'DEVELOPMENT']
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  AmplifyServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-amplify-service-role-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: amplify.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess-Amplify
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ========================================
+  # COGNITO AUTHENTICATION
+  # ========================================
+  
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub '${ProjectName}-user-pool-${Environment}'
+      AliasAttributes:
+        - email
+        - preferred_username
+      AutoVerifiedAttributes:
+        - email
+      EmailConfiguration:
+        EmailSendingAccount: COGNITO_DEFAULT
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          TemporaryPasswordValidityDays: 7
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+          Mutable: true
+        - Name: name
+          AttributeDataType: String
+          Required: true
+          Mutable: true
+        - Name: organization
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+        - Name: role
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+      UserPoolTags:
+        Environment: !Ref Environment
+        Project: !Ref ProjectName
+        Purpose: 'Healthcare application user authentication'
+
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub '${ProjectName}-web-client-${Environment}'
+      UserPoolId: !Ref CognitoUserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+      PreventUserExistenceErrors: ENABLED
+      SupportedIdentityProviders:
+        - COGNITO
+      CallbackURLs:
+        - !Sub 'https://${Environment}-branch.${BiomarkerAmplifyApp.DefaultDomain}/callback'
+        - 'http://localhost:3000/callback'
+      LogoutURLs:
+        - !Sub 'https://${Environment}-branch.${BiomarkerAmplifyApp.DefaultDomain}/logout'
+        - 'http://localhost:3000/logout'
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthScopes:
+        - email
+        - openid
+        - profile
+      AllowedOAuthFlowsUserPoolClient: true
+
+  CognitoIdentityPool:
+    Type: AWS::Cognito::IdentityPool
+    Properties:
+      IdentityPoolName: !Sub '${ProjectName}_identity_pool_${Environment}'
+      AllowUnauthenticatedIdentities: false
+      CognitoIdentityProviders:
+        - ClientId: !Ref CognitoUserPoolClient
+          ProviderName: !GetAtt CognitoUserPool.ProviderName
+
+  CognitoIdentityPoolRoleAttachment:
+    Type: AWS::Cognito::IdentityPoolRoleAttachment
+    Properties:
+      IdentityPoolId: !Ref CognitoIdentityPool
+      Roles:
+        authenticated: !GetAtt CognitoAuthenticatedRole.Arn
+        unauthenticated: !GetAtt CognitoUnauthenticatedRole.Arn
+
+  CognitoAuthenticatedRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-cognito-authenticated-role-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: cognito-identity.amazonaws.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                'cognito-identity.amazonaws.com:aud': !Ref CognitoIdentityPool
+              'ForAnyValue:StringLike':
+                'cognito-identity.amazonaws.com:amr': authenticated
+      Policies:
+        - PolicyName: CognitoAuthenticatedPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock-agent:InvokeAgent
+                Resource:
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent/UR5AFSSQXN'
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent/Q3Y7J9OP5Q'
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent/N6JRGX3Q0F'
+              - Effect: Allow
+                Action:
+                  - execute-api:Invoke
+                Resource: !Sub '${BiomarkerAPI}/*'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub '${BiomarkerDataBucket}/user-uploads/*'
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                Resource:
+                  - !GetAtt ScientificLiteratureTable.Arn
+                  - !GetAtt BiomarkerAnalysisResultsTable.Arn
+                  - !Sub '${ScientificLiteratureTable.Arn}/index/*'
+                  - !Sub '${BiomarkerAnalysisResultsTable.Arn}/index/*'
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  CognitoUnauthenticatedRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-cognito-unauthenticated-role-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: cognito-identity.amazonaws.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                'cognito-identity.amazonaws.com:aud': !Ref CognitoIdentityPool
+              'ForAnyValue:StringLike':
+                'cognito-identity.amazonaws.com:amr': unauthenticated
+      Policies:
+        - PolicyName: CognitoUnauthenticatedPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Deny
+                Action: '*'
+                Resource: '*'
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ========================================
+  # API GATEWAY
+  # ========================================
+  
+  BiomarkerAPI:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub '${ProjectName}-api-${Environment}'
+      Description: 'Biomarker Discovery API for healthcare applications'
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      Policy:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: execute-api:Invoke
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:SourceVpc': !Ref VpcId
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  BiomarkerAPIDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - AgentsProxyMethod
+      - AnalysisProxyMethod
+    Properties:
+      RestApiId: !Ref BiomarkerAPI
+      StageName: !Ref Environment
+      StageDescription: !Sub '${Environment} stage for biomarker API'
+
+  # API Resources
+  AgentsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref BiomarkerAPI
+      ParentId: !GetAtt BiomarkerAPI.RootResourceId
+      PathPart: 'agents'
+
+  AgentsProxyResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref BiomarkerAPI
+      ParentId: !Ref AgentsResource
+      PathPart: '{proxy+}'
+
+  AgentsProxyMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref BiomarkerAPI
+      ResourceId: !Ref AgentsProxyResource
+      HttpMethod: ANY
+      AuthorizationType: AWS_IAM
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ScientificLiteratureFunction.Arn}/invocations'
+
+  AnalysisResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref BiomarkerAPI
+      ParentId: !GetAtt BiomarkerAPI.RootResourceId
+      PathPart: 'analysis'
+
+  AnalysisProxyResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref BiomarkerAPI
+      ParentId: !Ref AnalysisResource
+      PathPart: '{proxy+}'
+
+  AnalysisProxyMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref BiomarkerAPI
+      ResourceId: !Ref AnalysisProxyResource
+      HttpMethod: ANY
+      AuthorizationType: AWS_IAM
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${DataProcessingLambda.Arn}/invocations'
+
+  # Lambda Permissions for API Gateway
+  AgentsLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ScientificLiteratureFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub '${BiomarkerAPI}/*/ANY/agents/*'
+
+  AnalysisLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DataProcessingLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub '${BiomarkerAPI}/*/ANY/analysis/*'

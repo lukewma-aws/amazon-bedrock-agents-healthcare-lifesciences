@@ -1,0 +1,664 @@
+  # ========================================
+  # IAM ROLES FOR LAMBDA FUNCTIONS
+  # ========================================
+  
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-lambda-execution-role-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: BiomarkerAppPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !GetAtt ScientificLiteratureTable.Arn
+                  - !GetAtt PromptCatalogTable.Arn
+                  - !GetAtt BiomarkerAnalysisResultsTable.Arn
+                  - !Sub '${ScientificLiteratureTable.Arn}/index/*'
+                  - !Sub '${PromptCatalogTable.Arn}/index/*'
+                  - !Sub '${BiomarkerAnalysisResultsTable.Arn}/index/*'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource:
+                  - !Sub '${BiomarkerDataBucket}/*'
+                  - !Sub '${AthenaOutputBucket}/*'
+                  - !Sub '${KnowledgeBaseBucket}/*'
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource:
+                  - !Ref BiomarkerDataBucket
+                  - !Ref AthenaOutputBucket
+                  - !Ref KnowledgeBaseBucket
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                  - bedrock:Retrieve
+                  - bedrock:RetrieveAndGenerate
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - athena:StartQueryExecution
+                  - athena:GetQueryExecution
+                  - athena:GetQueryResults
+                  - athena:StopQueryExecution
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - redshift-data:ExecuteStatement
+                  - redshift-data:DescribeStatement
+                  - redshift-data:GetStatementResult
+                  - redshift-data:ListStatements
+                  - redshift:GetClusterCredentials
+                  - redshift:DescribeClusters
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - states:StartExecution
+                  - states:DescribeExecution
+                  - states:StopExecution
+                Resource: !Ref BiomarkerAnalysisStateMachine
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: '*'
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ========================================
+  # LAMBDA FUNCTIONS
+  # ========================================
+  
+  ScientificLiteratureFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-scientific-literature-${Environment}'
+      Runtime: python3.12
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 900
+      MemorySize: 10240
+      Environment:
+        Variables:
+          DYNAMODB_TABLE: !Ref ScientificLiteratureTable
+          S3_BUCKET: !Ref BiomarkerDataBucket
+          ENVIRONMENT: !Ref Environment
+          LOG_LEVEL: 'INFO'
+      Code:
+        ZipFile: |
+          import json
+          import logging
+          import boto3
+          import os
+          from typing import Dict, List, Any
+          import urllib.request
+          import urllib.parse
+          import xml.etree.ElementTree as ET
+          from datetime import datetime
+          import uuid
+
+          logger = logging.getLogger()
+          logger.setLevel(os.environ.get('LOG_LEVEL', 'INFO'))
+
+          # Initialize AWS clients
+          dynamodb = boto3.resource('dynamodb')
+          bedrock = boto3.client('bedrock-runtime')
+          s3 = boto3.client('s3')
+
+          def lambda_handler(event, context):
+              """
+              Scientific literature search and analysis function
+              """
+              try:
+                  logger.info(f"Received event: {json.dumps(event)}")
+                  
+                  # Extract parameters from the event
+                  parameters = event.get('parameters', [])
+                  param_dict = {param['name']: param['value'] for param in parameters}
+                  
+                  action = param_dict.get('action', '')
+                  query = param_dict.get('query', '')
+                  
+                  if action == 'search_pubmed':
+                      result = search_pubmed(query)
+                  elif action == 'analyze_literature':
+                      result = analyze_literature(query)
+                  elif action == 'get_search_history':
+                      user_id = param_dict.get('user_id', 'anonymous')
+                      result = get_search_history(user_id)
+                  else:
+                      result = {'error': f'Unknown action: {action}'}
+                  
+                  return {
+                      'response': {
+                          'actionGroupInvocationOutput': {
+                              'text': json.dumps(result, indent=2, default=str)
+                          }
+                      }
+                  }
+                  
+              except Exception as e:
+                  logger.error(f"Error in lambda_handler: {str(e)}")
+                  return {
+                      'response': {
+                          'actionGroupInvocationOutput': {
+                              'text': f'Error processing request: {str(e)}'
+                          }
+                      }
+                  }
+
+          def search_pubmed(query: str) -> Dict[str, Any]:
+              """Search PubMed for scientific literature"""
+              try:
+                  # Encode query for URL
+                  encoded_query = urllib.parse.quote(query)
+                  
+                  # PubMed search URL
+                  search_url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term={encoded_query}&retmax=10&retmode=json"
+                  
+                  # Make request to PubMed
+                  with urllib.request.urlopen(search_url) as response:
+                      search_data = json.loads(response.read().decode())
+                  
+                  pmids = search_data.get('esearchresult', {}).get('idlist', [])
+                  
+                  if not pmids:
+                      return {'results': [], 'message': 'No articles found'}
+                  
+                  # Get article details
+                  pmid_list = ','.join(pmids)
+                  detail_url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pubmed&id={pmid_list}&retmode=json"
+                  
+                  with urllib.request.urlopen(detail_url) as response:
+                      detail_data = json.loads(response.read().decode())
+                  
+                  articles = []
+                  for pmid in pmids:
+                      if pmid in detail_data.get('result', {}):
+                          article = detail_data['result'][pmid]
+                          articles.append({
+                              'pmid': pmid,
+                              'title': article.get('title', ''),
+                              'authors': [author.get('name', '') for author in article.get('authors', [])],
+                              'journal': article.get('fulljournalname', ''),
+                              'pubdate': article.get('pubdate', ''),
+                              'doi': article.get('elocationid', '').replace('doi: ', '') if 'doi:' in article.get('elocationid', '') else ''
+                          })
+                  
+                  # Store search in DynamoDB
+                  store_search_result(query, articles)
+                  
+                  return {
+                      'query': query,
+                      'results': articles,
+                      'total_found': len(articles)
+                  }
+                  
+              except Exception as e:
+                  logger.error(f"Error searching PubMed: {str(e)}")
+                  return {'error': f'PubMed search failed: {str(e)}'}
+
+          def analyze_literature(query: str) -> Dict[str, Any]:
+              """Analyze literature using Bedrock"""
+              try:
+                  # First search for relevant literature
+                  search_results = search_pubmed(query)
+                  
+                  if 'error' in search_results:
+                      return search_results
+                  
+                  # Prepare context for analysis
+                  articles_text = ""
+                  for article in search_results.get('results', []):
+                      articles_text += f"Title: {article['title']}\n"
+                      articles_text += f"Authors: {', '.join(article['authors'])}\n"
+                      articles_text += f"Journal: {article['journal']}\n"
+                      articles_text += f"Date: {article['pubdate']}\n\n"
+                  
+                  # Create analysis prompt
+                  prompt = f"""
+                  Analyze the following scientific literature related to the query: "{query}"
+                  
+                  Literature:
+                  {articles_text}
+                  
+                  Please provide:
+                  1. Key findings and themes
+                  2. Research gaps identified
+                  3. Clinical implications
+                  4. Recommendations for further research
+                  
+                  Focus on biomarker discovery and clinical applications.
+                  """
+                  
+                  # Call Bedrock for analysis
+                  response = bedrock.invoke_model(
+                      modelId='anthropic.claude-3-sonnet-20240229-v1:0',
+                      body=json.dumps({
+                          'anthropic_version': 'bedrock-2023-05-31',
+                          'max_tokens': 4000,
+                          'messages': [
+                              {
+                                  'role': 'user',
+                                  'content': prompt
+                              }
+                          ]
+                      })
+                  )
+                  
+                  response_body = json.loads(response['body'].read())
+                  analysis = response_body['content'][0]['text']
+                  
+                  return {
+                      'query': query,
+                      'literature_count': len(search_results.get('results', [])),
+                      'analysis': analysis,
+                      'articles': search_results.get('results', [])
+                  }
+                  
+              except Exception as e:
+                  logger.error(f"Error analyzing literature: {str(e)}")
+                  return {'error': f'Literature analysis failed: {str(e)}'}
+
+          def store_search_result(query: str, articles: List[Dict]) -> None:
+              """Store search result in DynamoDB"""
+              try:
+                  table = dynamodb.Table(os.environ['DYNAMODB_TABLE'])
+                  
+                  item = {
+                      'question_id': str(uuid.uuid4()),
+                      'timestamp': int(datetime.now().timestamp()),
+                      'user_id': 'system',
+                      'query': query,
+                      'results': articles,
+                      'result_count': len(articles),
+                      'created_at': datetime.now().isoformat()
+                  }
+                  
+                  table.put_item(Item=item)
+                  logger.info(f"Stored search result for query: {query}")
+                  
+              except Exception as e:
+                  logger.error(f"Error storing search result: {str(e)}")
+
+          def get_search_history(user_id: str) -> Dict[str, Any]:
+              """Get search history for a user"""
+              try:
+                  table = dynamodb.Table(os.environ['DYNAMODB_TABLE'])
+                  
+                  response = table.query(
+                      IndexName='UserIndex',
+                      KeyConditionExpression='user_id = :user_id',
+                      ExpressionAttributeValues={
+                          ':user_id': user_id
+                      },
+                      ScanIndexForward=False,
+                      Limit=20
+                  )
+                  
+                  return {
+                      'user_id': user_id,
+                      'searches': response.get('Items', [])
+                  }
+                  
+              except Exception as e:
+                  logger.error(f"Error getting search history: {str(e)}")
+                  return {'error': f'Failed to get search history: {str(e)}'}
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds: !Ref PrivateSubnetIds
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Purpose
+          Value: 'Scientific literature search and analysis'
+
+  DataProcessingLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-data-processing-${Environment}'
+      Runtime: python3.12
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 900
+      MemorySize: 3008
+      Environment:
+        Variables:
+          RESULTS_TABLE: !Ref BiomarkerAnalysisResultsTable
+          S3_BUCKET: !Ref BiomarkerDataBucket
+          STATE_MACHINE_ARN: !Ref BiomarkerAnalysisStateMachine
+          ENVIRONMENT: !Ref Environment
+      Code:
+        ZipFile: |
+          import json
+          import logging
+          import boto3
+          import os
+          from datetime import datetime
+          import uuid
+          import pandas as pd
+          from io import StringIO
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          # Initialize AWS clients
+          s3 = boto3.client('s3')
+          dynamodb = boto3.resource('dynamodb')
+          stepfunctions = boto3.client('stepfunctions')
+
+          def lambda_handler(event, context):
+              """
+              Process uploaded biomarker data files
+              """
+              try:
+                  logger.info(f"Received event: {json.dumps(event)}")
+                  
+                  # Handle S3 event
+                  if 'Records' in event:
+                      for record in event['Records']:
+                          if record['eventSource'] == 'aws:s3':
+                              bucket = record['s3']['bucket']['name']
+                              key = record['s3']['object']['key']
+                              
+                              result = process_s3_file(bucket, key)
+                              logger.info(f"Processed file {key}: {result}")
+                  
+                  # Handle direct invocation
+                  else:
+                      bucket = event.get('bucket')
+                      key = event.get('key')
+                      
+                      if bucket and key:
+                          result = process_s3_file(bucket, key)
+                          return result
+                  
+                  return {'statusCode': 200, 'body': 'Processing completed'}
+                  
+              except Exception as e:
+                  logger.error(f"Error in data processing: {str(e)}")
+                  return {'statusCode': 500, 'body': f'Error: {str(e)}'}
+
+          def process_s3_file(bucket: str, key: str) -> dict:
+              """Process a single S3 file"""
+              try:
+                  # Get file from S3
+                  response = s3.get_object(Bucket=bucket, Key=key)
+                  content = response['Body'].read().decode('utf-8')
+                  
+                  # Parse CSV data
+                  df = pd.read_csv(StringIO(content))
+                  
+                  # Basic data validation
+                  validation_result = validate_biomarker_data(df)
+                  
+                  # Create analysis record
+                  analysis_id = str(uuid.uuid4())
+                  analysis_record = {
+                      'analysis_id': analysis_id,
+                      'created_at': int(datetime.now().timestamp()),
+                      'user_id': 'system',
+                      'status': 'processing',
+                      'file_key': key,
+                      'file_bucket': bucket,
+                      'data_summary': {
+                          'rows': len(df),
+                          'columns': len(df.columns),
+                          'column_names': df.columns.tolist()
+                      },
+                      'validation_result': validation_result,
+                      'ttl': int(datetime.now().timestamp()) + (30 * 24 * 60 * 60)  # 30 days TTL
+                  }
+                  
+                  # Store in DynamoDB
+                  table = dynamodb.Table(os.environ['RESULTS_TABLE'])
+                  table.put_item(Item=analysis_record)
+                  
+                  # Start Step Function execution if validation passed
+                  if validation_result['valid']:
+                      stepfunctions.start_execution(
+                          stateMachineArn=os.environ['STATE_MACHINE_ARN'],
+                          name=f"analysis-{analysis_id}",
+                          input=json.dumps({
+                              'analysis_id': analysis_id,
+                              'bucket': bucket,
+                              'key': key,
+                              'data_summary': analysis_record['data_summary']
+                          })
+                      )
+                  
+                  return {
+                      'analysis_id': analysis_id,
+                      'status': 'initiated' if validation_result['valid'] else 'validation_failed',
+                      'validation': validation_result
+                  }
+                  
+              except Exception as e:
+                  logger.error(f"Error processing file {key}: {str(e)}")
+                  raise
+
+          def validate_biomarker_data(df: pd.DataFrame) -> dict:
+              """Validate biomarker data format"""
+              try:
+                  errors = []
+                  warnings = []
+                  
+                  # Check for required columns
+                  required_columns = ['patient_id', 'biomarker_name', 'value']
+                  missing_columns = [col for col in required_columns if col not in df.columns]
+                  
+                  if missing_columns:
+                      errors.append(f"Missing required columns: {missing_columns}")
+                  
+                  # Check for empty data
+                  if len(df) == 0:
+                      errors.append("Dataset is empty")
+                  
+                  # Check for duplicate patient IDs
+                  if 'patient_id' in df.columns:
+                      duplicates = df['patient_id'].duplicated().sum()
+                      if duplicates > 0:
+                          warnings.append(f"Found {duplicates} duplicate patient IDs")
+                  
+                  # Check for missing values
+                  missing_values = df.isnull().sum().sum()
+                  if missing_values > 0:
+                      warnings.append(f"Found {missing_values} missing values")
+                  
+                  return {
+                      'valid': len(errors) == 0,
+                      'errors': errors,
+                      'warnings': warnings,
+                      'summary': {
+                          'total_rows': len(df),
+                          'total_columns': len(df.columns),
+                          'missing_values': int(missing_values)
+                      }
+                  }
+                  
+              except Exception as e:
+                  return {
+                      'valid': False,
+                      'errors': [f"Validation error: {str(e)}"],
+                      'warnings': []
+                  }
+      Layers:
+        - arn:aws:lambda:us-east-1:336392948345:layer:AWSSDKPandas-Python312:1
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds: !Ref PrivateSubnetIds
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Purpose
+          Value: 'Biomarker data processing and validation'
+
+  KnowledgeBaseSyncLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-knowledge-base-sync-${Environment}'
+      Runtime: python3.12
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 900
+      MemorySize: 512
+      Environment:
+        Variables:
+          KNOWLEDGE_BASE_ID: 'XET4I16NVF'  # From existing knowledge base
+          S3_BUCKET: !Ref KnowledgeBaseBucket
+          ENVIRONMENT: !Ref Environment
+      Code:
+        ZipFile: |
+          import json
+          import logging
+          import boto3
+          import os
+          from datetime import datetime
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          # Initialize AWS clients
+          bedrock_agent = boto3.client('bedrock-agent')
+          s3 = boto3.client('s3')
+
+          def lambda_handler(event, context):
+              """
+              Sync knowledge base when new documents are uploaded
+              """
+              try:
+                  logger.info(f"Received event: {json.dumps(event)}")
+                  
+                  # Handle S3 event
+                  if 'Records' in event:
+                      for record in event['Records']:
+                          if record['eventSource'] == 'aws:s3':
+                              bucket = record['s3']['bucket']['name']
+                              key = record['s3']['object']['key']
+                              
+                              logger.info(f"Processing new document: {key}")
+                              
+                              # Start knowledge base ingestion
+                              result = sync_knowledge_base()
+                              logger.info(f"Knowledge base sync result: {result}")
+                  
+                  return {'statusCode': 200, 'body': 'Knowledge base sync initiated'}
+                  
+              except Exception as e:
+                  logger.error(f"Error in knowledge base sync: {str(e)}")
+                  return {'statusCode': 500, 'body': f'Error: {str(e)}'}
+
+          def sync_knowledge_base():
+              """Start knowledge base ingestion job"""
+              try:
+                  knowledge_base_id = os.environ['KNOWLEDGE_BASE_ID']
+                  
+                  response = bedrock_agent.start_ingestion_job(
+                      knowledgeBaseId=knowledge_base_id,
+                      description=f"Automated sync triggered at {datetime.now().isoformat()}"
+                  )
+                  
+                  return {
+                      'job_id': response['ingestionJob']['ingestionJobId'],
+                      'status': response['ingestionJob']['status'],
+                      'knowledge_base_id': knowledge_base_id
+                  }
+                  
+              except Exception as e:
+                  logger.error(f"Error starting ingestion job: {str(e)}")
+                  raise
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds: !Ref PrivateSubnetIds
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Purpose
+          Value: 'Knowledge base document synchronization'
+
+  # ========================================
+  # LAMBDA PERMISSIONS FOR S3 TRIGGERS
+  # ========================================
+  
+  DataProcessingLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DataProcessingLambda
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !Sub '${BiomarkerDataBucket}/*'
+
+  KnowledgeBaseSyncLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref KnowledgeBaseSyncLambda
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !Sub '${KnowledgeBaseBucket}/*'
+
+  # ========================================
+  # SECURITY GROUP FOR LAMBDA FUNCTIONS
+  # ========================================
+  
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${ProjectName}-lambda-sg-${Environment}'
+      GroupDescription: 'Security group for Lambda functions'
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: 'HTTPS outbound for AWS API calls'
+        - IpProtocol: tcp
+          FromPort: 5439
+          ToPort: 5439
+          CidrIp: 10.0.0.0/16
+          Description: 'Redshift database access'
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Purpose
+          Value: 'Lambda function security group'

@@ -1,0 +1,493 @@
+  # ========================================
+  # STEP FUNCTIONS STATE MACHINES
+  # ========================================
+  
+  StepFunctionsExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-stepfunctions-role-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StepFunctionsExecutionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !GetAtt ScientificLiteratureFunction.Arn
+                  - !GetAtt DataProcessingLambda.Arn
+                  - !GetAtt KnowledgeBaseSyncLambda.Arn
+              - Effect: Allow
+                Action:
+                  - bedrock-agent:InvokeAgent
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !GetAtt BiomarkerAnalysisResultsTable.Arn
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource:
+                  - !Sub '${BiomarkerDataBucket}/*'
+                  - !Sub '${AthenaOutputBucket}/*'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  BiomarkerAnalysisStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub '${ProjectName}-biomarker-analysis-${Environment}'
+      StateMachineType: STANDARD
+      RoleArn: !GetAtt StepFunctionsExecutionRole.Arn
+      LoggingConfiguration:
+        Level: ALL
+        IncludeExecutionData: true
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt BiomarkerAnalysisLogGroup.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "Biomarker Analysis Workflow",
+          "StartAt": "UpdateAnalysisStatus",
+          "States": {
+            "UpdateAnalysisStatus": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::dynamodb:putItem",
+              "Parameters": {
+                "TableName": "${BiomarkerAnalysisResultsTable}",
+                "Item": {
+                  "analysis_id": {"S.$": "$.analysis_id"},
+                  "status": {"S": "processing"},
+                  "updated_at": {"N.$": "$$.State.EnteredTime"},
+                  "step": {"S": "data_validation"}
+                }
+              },
+              "Next": "ProcessBiomarkerData",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ]
+            },
+            "ProcessBiomarkerData": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${DataProcessingLambda}",
+                "Payload": {
+                  "analysis_id.$": "$.analysis_id",
+                  "bucket.$": "$.bucket",
+                  "key.$": "$.key",
+                  "step": "detailed_processing"
+                }
+              },
+              "Next": "CheckProcessingResult",
+              "Retry": [
+                {
+                  "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 6,
+                  "BackoffRate": 2.0
+                }
+              ]
+            },
+            "CheckProcessingResult": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.Payload.status",
+                  "StringEquals": "success",
+                  "Next": "InvokeBiomarkerAgent"
+                },
+                {
+                  "Variable": "$.Payload.status",
+                  "StringEquals": "validation_failed",
+                  "Next": "HandleValidationFailure"
+                }
+              ],
+              "Default": "HandleProcessingError"
+            },
+            "InvokeBiomarkerAgent": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::bedrock:invokeAgent",
+              "Parameters": {
+                "AgentId": "UR5AFSSQXN",
+                "AgentAliasId": "TSTALIASID",
+                "SessionId.$": "$.analysis_id",
+                "InputText.$": "States.Format('Analyze the biomarker data from file {} with {} rows and {} columns. Provide insights on biomarker patterns, statistical significance, and clinical implications.', $.key, $.Payload.data_summary.rows, $.Payload.data_summary.columns)"
+              },
+              "Next": "ProcessAgentResponse",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 5,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ]
+            },
+            "ProcessAgentResponse": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${ScientificLiteratureFunction}",
+                "Payload": {
+                  "action": "analyze_literature",
+                  "query.$": "States.Format('biomarker analysis results: {}', $.Output.Text)",
+                  "analysis_id.$": "$.analysis_id"
+                }
+              },
+              "Next": "SaveFinalResults",
+              "Retry": [
+                {
+                  "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ]
+            },
+            "SaveFinalResults": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::dynamodb:updateItem",
+              "Parameters": {
+                "TableName": "${BiomarkerAnalysisResultsTable}",
+                "Key": {
+                  "analysis_id": {"S.$": "$.analysis_id"}
+                },
+                "UpdateExpression": "SET #status = :status, #results = :results, #completed_at = :completed_at, #step = :step",
+                "ExpressionAttributeNames": {
+                  "#status": "status",
+                  "#results": "results",
+                  "#completed_at": "completed_at",
+                  "#step": "step"
+                },
+                "ExpressionAttributeValues": {
+                  ":status": {"S": "completed"},
+                  ":results": {"S.$": "States.JsonToString($.Payload)"},
+                  ":completed_at": {"N.$": "$$.State.EnteredTime"},
+                  ":step": {"S": "completed"}
+                }
+              },
+              "Next": "AnalysisComplete"
+            },
+            "HandleValidationFailure": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::dynamodb:updateItem",
+              "Parameters": {
+                "TableName": "${BiomarkerAnalysisResultsTable}",
+                "Key": {
+                  "analysis_id": {"S.$": "$.analysis_id"}
+                },
+                "UpdateExpression": "SET #status = :status, #error = :error, #completed_at = :completed_at",
+                "ExpressionAttributeNames": {
+                  "#status": "status",
+                  "#error": "error",
+                  "#completed_at": "completed_at"
+                },
+                "ExpressionAttributeValues": {
+                  ":status": {"S": "validation_failed"},
+                  ":error": {"S": "Data validation failed"},
+                  ":completed_at": {"N.$": "$$.State.EnteredTime"}
+                }
+              },
+              "Next": "ValidationFailed"
+            },
+            "HandleProcessingError": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::dynamodb:updateItem",
+              "Parameters": {
+                "TableName": "${BiomarkerAnalysisResultsTable}",
+                "Key": {
+                  "analysis_id": {"S.$": "$.analysis_id"}
+                },
+                "UpdateExpression": "SET #status = :status, #error = :error, #completed_at = :completed_at",
+                "ExpressionAttributeNames": {
+                  "#status": "status",
+                  "#error": "error",
+                  "#completed_at": "completed_at"
+                },
+                "ExpressionAttributeValues": {
+                  ":status": {"S": "processing_failed"},
+                  ":error": {"S": "Data processing failed"},
+                  ":completed_at": {"N.$": "$$.State.EnteredTime"}
+                }
+              },
+              "Next": "ProcessingFailed"
+            },
+            "AnalysisComplete": {
+              "Type": "Succeed",
+              "Comment": "Biomarker analysis completed successfully"
+            },
+            "ValidationFailed": {
+              "Type": "Fail",
+              "Cause": "Data validation failed",
+              "Error": "ValidationError"
+            },
+            "ProcessingFailed": {
+              "Type": "Fail",
+              "Cause": "Data processing failed",
+              "Error": "ProcessingError"
+            }
+          }
+        }
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Purpose
+          Value: 'Biomarker analysis workflow orchestration'
+
+  LiteratureCurationStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub '${ProjectName}-literature-curation-${Environment}'
+      StateMachineType: STANDARD
+      RoleArn: !GetAtt StepFunctionsExecutionRole.Arn
+      LoggingConfiguration:
+        Level: ALL
+        IncludeExecutionData: true
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt LiteratureCurationLogGroup.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "Literature Curation and Analysis Workflow",
+          "StartAt": "InitializeCuration",
+          "States": {
+            "InitializeCuration": {
+              "Type": "Pass",
+              "Parameters": {
+                "curation_id.$": "$$.Execution.Name",
+                "start_time.$": "$$.State.EnteredTime",
+                "query.$": "$.query",
+                "max_articles": 20
+              },
+              "Next": "SearchPubMed"
+            },
+            "SearchPubMed": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${ScientificLiteratureFunction}",
+                "Payload": {
+                  "action": "search_pubmed",
+                  "query.$": "$.query",
+                  "max_results.$": "$.max_articles"
+                }
+              },
+              "Next": "CheckSearchResults",
+              "Retry": [
+                {
+                  "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ]
+            },
+            "CheckSearchResults": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.Payload.total_found",
+                  "NumericGreaterThan": 0,
+                  "Next": "AnalyzeLiterature"
+                }
+              ],
+              "Default": "NoResultsFound"
+            },
+            "AnalyzeLiterature": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${ScientificLiteratureFunction}",
+                "Payload": {
+                  "action": "analyze_literature",
+                  "query.$": "$.query",
+                  "articles.$": "$.Payload.results"
+                }
+              },
+              "Next": "InvokeClinicalAgent",
+              "Retry": [
+                {
+                  "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ]
+            },
+            "InvokeClinicalAgent": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::bedrock:invokeAgent",
+              "Parameters": {
+                "AgentId": "Q3Y7J9OP5Q",
+                "AgentAliasId": "TSTALIASID",
+                "SessionId.$": "$.curation_id",
+                "InputText.$": "States.Format('Based on the literature analysis for query: {}, provide clinical insights and recommendations for biomarker research. Focus on translational applications and clinical trial implications.', $.query)"
+              },
+              "Next": "SaveCurationResults",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 5,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ]
+            },
+            "SaveCurationResults": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::dynamodb:putItem",
+              "Parameters": {
+                "TableName": "${ScientificLiteratureTable}",
+                "Item": {
+                  "question_id": {"S.$": "$.curation_id"},
+                  "timestamp": {"N.$": "$.start_time"},
+                  "user_id": {"S": "system"},
+                  "query": {"S.$": "$.query"},
+                  "literature_analysis": {"S.$": "States.JsonToString($.Payload)"},
+                  "clinical_insights": {"S.$": "$.Output.Text"},
+                  "article_count": {"N.$": "States.JsonToString($.Payload.literature_count)"},
+                  "curation_type": {"S": "automated"},
+                  "status": {"S": "completed"}
+                }
+              },
+              "Next": "CurationComplete"
+            },
+            "NoResultsFound": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::dynamodb:putItem",
+              "Parameters": {
+                "TableName": "${ScientificLiteratureTable}",
+                "Item": {
+                  "question_id": {"S.$": "$.curation_id"},
+                  "timestamp": {"N.$": "$.start_time"},
+                  "user_id": {"S": "system"},
+                  "query": {"S.$": "$.query"},
+                  "status": {"S": "no_results"},
+                  "message": {"S": "No literature found for the specified query"}
+                }
+              },
+              "Next": "NoResults"
+            },
+            "CurationComplete": {
+              "Type": "Succeed",
+              "Comment": "Literature curation completed successfully"
+            },
+            "NoResults": {
+              "Type": "Succeed",
+              "Comment": "No literature found for curation"
+            }
+          }
+        }
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Purpose
+          Value: 'Literature curation and analysis workflow'
+
+  # ========================================
+  # CLOUDWATCH LOG GROUPS FOR STEP FUNCTIONS
+  # ========================================
+  
+  BiomarkerAnalysisLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/stepfunctions/${ProjectName}-biomarker-analysis-${Environment}'
+      RetentionInDays: 30
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  LiteratureCurationLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/stepfunctions/${ProjectName}-literature-curation-${Environment}'
+      RetentionInDays: 30
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ========================================
+  # EVENTBRIDGE RULES FOR AUTOMATED WORKFLOWS
+  # ========================================
+  
+  DailyLiteratureCurationRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${ProjectName}-daily-literature-curation-${Environment}'
+      Description: 'Trigger daily literature curation for trending biomarker topics'
+      ScheduleExpression: 'cron(0 6 * * ? *)'  # Daily at 6 AM UTC
+      State: ENABLED
+      Targets:
+        - Arn: !Ref LiteratureCurationStateMachine
+          Id: 'DailyLiteratureCurationTarget'
+          RoleArn: !GetAtt EventBridgeExecutionRole.Arn
+          Input: !Sub |
+            {
+              "query": "cancer biomarkers clinical trials",
+              "automated": true,
+              "schedule": "daily"
+            }
+
+  EventBridgeExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-eventbridge-role-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: EventBridgeExecutionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - states:StartExecution
+                Resource:
+                  - !Ref BiomarkerAnalysisStateMachine
+                  - !Ref LiteratureCurationStateMachine
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName

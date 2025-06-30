@@ -1,0 +1,339 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Biomarker Application Infrastructure - Generated from existing AWS resources'
+Metadata:
+  GeneratedFrom: 'AWS Resource Discovery'
+  LastUpdated: '2025-06-30'
+  Environment: 'Production'
+  Purpose: 'Healthcare Biomarker Discovery Application Infrastructure'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: 'prod'
+    AllowedValues: ['dev', 'staging', 'prod']
+    Description: 'Environment name for resource naming'
+  
+  ProjectName:
+    Type: String
+    Default: 'biomarker-app'
+    Description: 'Project name for resource naming'
+  
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: 'VPC ID for resource deployment'
+    Default: 'vpc-0640bbe32a3af7163'
+  
+  PrivateSubnetIds:
+    Type: CommaDelimitedList
+    Description: 'Private subnet IDs for Lambda and RDS deployment'
+  
+  PublicSubnetIds:
+    Type: CommaDelimitedList
+    Description: 'Public subnet IDs for ALB and NAT Gateway'
+  
+  RedshiftClusterIdentifier:
+    Type: String
+    Default: 'biomarker-redshift-cluster'
+    Description: 'Existing Redshift cluster identifier'
+  
+  BedrockAgentRoleArn:
+    Type: String
+    Description: 'Existing Bedrock Agent Role ARN'
+    Default: 'arn:aws:iam::796973485077:role/AmazonBedrockExecutionRoleForAgents_796973485077'
+  
+  KMSKeyId:
+    Type: String
+    Description: 'KMS Key ID for encryption'
+    Default: 'alias/aws/s3'
+
+Conditions:
+  IsProd: !Equals [!Ref Environment, 'prod']
+  IsNotProd: !Not [!Equals [!Ref Environment, 'prod']]
+
+Resources:
+  # ========================================
+  # S3 BUCKETS
+  # ========================================
+  
+  BiomarkerDataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-data-${Environment}-${AWS::AccountId}-${AWS::Region}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicReadWrite: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteIncompleteMultipartUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+          - Id: TransitionToIA
+            Status: Enabled
+            Transition:
+              Days: 30
+              StorageClass: STANDARD_IA
+          - Id: TransitionToGlacier
+            Status: Enabled
+            Transition:
+              Days: 90
+              StorageClass: GLACIER
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt DataProcessingLambda.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: 'biomarker-data/'
+                  - Name: suffix
+                    Value: '.csv'
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Purpose
+          Value: 'Biomarker data storage'
+
+  AthenaOutputBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-athena-output-${Environment}-${AWS::AccountId}-${AWS::Region}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicReadWrite: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldQueryResults
+            Status: Enabled
+            ExpirationInDays: 30
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Purpose
+          Value: 'Athena query results'
+
+  KnowledgeBaseBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-knowledge-base-${Environment}-${AWS::AccountId}-${AWS::Region}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicReadWrite: true
+      VersioningConfiguration:
+        Status: Enabled
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt KnowledgeBaseSyncLambda.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: 'documents/'
+                  - Name: suffix
+                    Value: '.pdf'
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Purpose
+          Value: 'Knowledge base document storage'
+
+  # ========================================
+  # DYNAMODB TABLES
+  # ========================================
+  
+  ScientificLiteratureTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ProjectName}-scientific-literature-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: 'question_id'
+          AttributeType: 'S'
+        - AttributeName: 'timestamp'
+          AttributeType: 'N'
+        - AttributeName: 'user_id'
+          AttributeType: 'S'
+      KeySchema:
+        - AttributeName: 'question_id'
+          KeyType: 'HASH'
+        - AttributeName: 'timestamp'
+          KeyType: 'RANGE'
+      GlobalSecondaryIndexes:
+        - IndexName: 'UserIndex'
+          KeySchema:
+            - AttributeName: 'user_id'
+              KeyType: 'HASH'
+            - AttributeName: 'timestamp'
+              KeyType: 'RANGE'
+          Projection:
+            ProjectionType: 'ALL'
+      StreamSpecification:
+        StreamViewType: 'NEW_AND_OLD_IMAGES'
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Purpose
+          Value: 'Scientific literature questions and responses'
+
+  PromptCatalogTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ProjectName}-prompt-catalog-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: 'prompt_id'
+          AttributeType: 'S'
+        - AttributeName: 'category'
+          AttributeType: 'S'
+        - AttributeName: 'version'
+          AttributeType: 'N'
+      KeySchema:
+        - AttributeName: 'prompt_id'
+          KeyType: 'HASH'
+        - AttributeName: 'version'
+          KeyType: 'RANGE'
+      GlobalSecondaryIndexes:
+        - IndexName: 'CategoryIndex'
+          KeySchema:
+            - AttributeName: 'category'
+              KeyType: 'HASH'
+            - AttributeName: 'version'
+              KeyType: 'RANGE'
+          Projection:
+            ProjectionType: 'ALL'
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Purpose
+          Value: 'Prompt templates and configurations'
+
+  BiomarkerAnalysisResultsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ProjectName}-analysis-results-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: 'analysis_id'
+          AttributeType: 'S'
+        - AttributeName: 'created_at'
+          AttributeType: 'N'
+        - AttributeName: 'user_id'
+          AttributeType: 'S'
+        - AttributeName: 'status'
+          AttributeType: 'S'
+      KeySchema:
+        - AttributeName: 'analysis_id'
+          KeyType: 'HASH'
+      GlobalSecondaryIndexes:
+        - IndexName: 'UserAnalysisIndex'
+          KeySchema:
+            - AttributeName: 'user_id'
+              KeyType: 'HASH'
+            - AttributeName: 'created_at'
+              KeyType: 'RANGE'
+          Projection:
+            ProjectionType: 'ALL'
+        - IndexName: 'StatusIndex'
+          KeySchema:
+            - AttributeName: 'status'
+              KeyType: 'HASH'
+            - AttributeName: 'created_at'
+              KeyType: 'RANGE'
+          Projection:
+            ProjectionType: 'ALL'
+      StreamSpecification:
+        StreamViewType: 'NEW_AND_OLD_IMAGES'
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: 'ttl'
+        Enabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Purpose
+          Value: 'Biomarker analysis results and metadata'
+
+Outputs:
+  BiomarkerDataBucketName:
+    Description: 'Biomarker data S3 bucket name'
+    Value: !Ref BiomarkerDataBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-BiomarkerDataBucket'
+  
+  AthenaOutputBucketName:
+    Description: 'Athena output S3 bucket name'
+    Value: !Ref AthenaOutputBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-AthenaOutputBucket'
+  
+  KnowledgeBaseBucketName:
+    Description: 'Knowledge base S3 bucket name'
+    Value: !Ref KnowledgeBaseBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-KnowledgeBaseBucket'
+  
+  ScientificLiteratureTableName:
+    Description: 'Scientific literature DynamoDB table name'
+    Value: !Ref ScientificLiteratureTable
+    Export:
+      Name: !Sub '${AWS::StackName}-ScientificLiteratureTable'
+  
+  PromptCatalogTableName:
+    Description: 'Prompt catalog DynamoDB table name'
+    Value: !Ref PromptCatalogTable
+    Export:
+      Name: !Sub '${AWS::StackName}-PromptCatalogTable'
+  
+  BiomarkerAnalysisResultsTableName:
+    Description: 'Biomarker analysis results DynamoDB table name'
+    Value: !Ref BiomarkerAnalysisResultsTable
+    Export:
+      Name: !Sub '${AWS::StackName}-BiomarkerAnalysisResultsTable'

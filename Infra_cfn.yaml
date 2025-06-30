@@ -362,6 +362,28 @@ Resources:
       TimeoutInMinutes: 35
       Tags:
         - Key: Project
+          Value: "hcls-agents-toolkit"
+
+  LiteratureCuratorAgent:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: agents_catalog/22-literature-curator-agent/literature-curator-agent-cfn.yaml
+      Parameters:
+        AgentIAMRoleArn: !GetAtt AgentRole.Arn
+      TimeoutInMinutes: 10
+      Tags:
+        - Key: Project
+          Value: "hcls-agents-toolkit"
+
+  AthenaSQLGeneratorAgent:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: agents_catalog/23-athena-sql-generator-agent/athena-sql-generator-agent-cfn.yaml
+      Parameters:
+        AgentIAMRoleArn: !GetAtt AgentRole.Arn
+      TimeoutInMinutes: 10
+      Tags:
+        - Key: Project
           Value: "hcls-agents-toolkit"          
 
 #################################################################################################################################################
