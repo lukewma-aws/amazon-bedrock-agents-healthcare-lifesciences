@@ -1,278 +1,390 @@
-# Biomarker Application Infrastructure Deployment Guide
+# HCLS Agents Toolkit with Enhanced Biomarker Infrastructure
 
-This guide provides comprehensive instructions for deploying the healthcare biomarker discovery application infrastructure on AWS.
+This deployment guide covers the complete HCLS (Healthcare and Life Sciences) Agents Toolkit with enhanced biomarker application infrastructure, integrated directly into the main `infra_cfn.yaml` template.
 
 ## Overview
 
-Based on the analysis of your existing AWS infrastructure, this deployment adds complementary components to your already sophisticated multi-agent biomarker system. Your current setup includes:
+Based on the analysis of your existing AWS infrastructure, this enhanced deployment includes:
 
-- **6 Active Bedrock Agents**: Including biomarker database analyst, clinical evidence researcher, medical imaging expert, and supervisor agent
-- **3 Knowledge Bases**: For variant storage, NCBI data, and Step Functions testing
-- **80+ Lambda Functions**: For scientific literature search, SQL queries, and imaging analysis
-- **30+ S3 Buckets**: For biomarker data, Athena outputs, and knowledge base storage
-- **Active Redshift Cluster**: `biomarker-redshift-cluster` with encryption and VPC isolation
+### Core HCLS Agents Toolkit
+- **Multi-agent biomarker discovery system** with supervisor agent
+- **Clinical trial protocol assistant** with research capabilities  
+- **Competitive intelligence agents** for market analysis
+- **Scientific literature search** and curation agents
+- **React web application** for user interaction
 
-## Architecture Components
+### Enhanced Biomarker Infrastructure (New)
+- **Additional S3 buckets** for data processing and storage
+- **DynamoDB tables** for metadata and results tracking
+- **Lambda functions** for scientific literature search and data processing
+- **Step Functions workflows** for automated analysis pipelines
+- **API Gateway** for programmatic access
+- **KMS encryption** for all data at rest and in transit
+- **HealthOmics integration** for genomic variant analysis
 
-The deployment creates the following additional infrastructure:
+### Existing HealthOmics Resources (Integrated)
+- **Reference Store**: `2289344333` (Reference store)
+- **Variant Stores**: 3 active stores with genomic variant data
+  - `my_variant_store_2` (2980d1e0d667) - 1MB data
+  - `my_variant_store_3` (8cd35661f78f) - 67MB data  
+  - `my_variant_store_4` (368016e44044) - 67MB data
+- **Annotation Store**: `my_annotation_store` (1aead2db2d7f) - 59MB VCF format
+- **Workflows**: GATK Variant Discovery and Sample workflows
 
-### Core Services
-- **S3 Buckets**: Data storage with encryption and lifecycle policies
-- **DynamoDB Tables**: Metadata and configuration storage
-- **Lambda Functions**: Data processing and API integration
-- **Step Functions**: Workflow orchestration
-- **API Gateway**: RESTful API endpoints
-- **Amplify**: Web application hosting
+## Architecture Integration
 
-### Security & Compliance
-- **VPC Integration**: Leverages your existing VPC (`vpc-0640bbe32a3af7163`)
-- **KMS Encryption**: All data encrypted at rest and in transit
-- **IAM Roles**: Least privilege access policies
-- **CloudWatch**: Comprehensive logging and monitoring
+The enhanced infrastructure integrates seamlessly with your existing components:
+
+```
+Existing Agents → Enhanced Lambda Functions → New DynamoDB Tables
+      ↓                    ↓                        ↓
+Step Functions Workflows → API Gateway → React Application
+      ↓                    ↓                        ↓
+S3 Data Processing → Knowledge Bases → Redshift Analytics
+      ↓                    ↓                        ↓
+HealthOmics Variant Stores → Genomic Analysis → Clinical Insights
+```
 
 ## Prerequisites
 
-1. **AWS CLI**: Version 2.x or higher
-2. **AWS Credentials**: Configured with appropriate permissions
-3. **Existing Infrastructure**: Your current biomarker multi-agent system
-4. **GitHub Repository**: For Amplify deployment (optional)
+### 1. AWS Account Setup
+- AWS CLI v2.x installed and configured
+- Appropriate IAM permissions for CloudFormation, Bedrock, and other services
+- Access to required AWS regions (us-east-1 or us-west-2 recommended)
 
-### Required AWS Permissions
+### 2. Bedrock Model Access
+Request access to these foundation models via the [AWS Console](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html):
+- Amazon Titan Embeddings G1 - Text
+- Amazon Nova Pro  
+- Anthropic Claude 3.5 Sonnet
+- Anthropic Claude 3.5 Sonnet v2
+- Anthropic Claude 3 Sonnet
 
-Your AWS user/role needs the following permissions:
-- CloudFormation full access
-- IAM role creation and management
-- S3, DynamoDB, Lambda, Step Functions, API Gateway, Amplify access
-- VPC and EC2 describe permissions
-- Bedrock agent access (already configured)
-
-## Quick Start
-
-1. **Clone and Navigate**:
-   ```bash
-   cd /Users/lukewma/Documents/github/amazon-bedrock-agents-cancer-biomarker-discovery
-   ```
-
-2. **Run Deployment**:
-   ```bash
-   ./deploy-infrastructure.sh
-   ```
-
-3. **Monitor Progress**:
-   The script will provide real-time status updates and validate prerequisites.
+### 3. Service Quotas
+[Request an increase](https://docs.aws.amazon.com/servicequotas/latest/userguide/request-quota-increase.html) for:
+- Amazon Bedrock "Parameters per function" quota to at least 10
+- Lambda concurrent executions (if needed)
+- Step Functions state transitions (if needed)
 
 ## Deployment Options
 
-### Standard Deployment
+### Option 1: One-Click Deployment (Recommended)
+
+Use the CloudFormation launch buttons from the README.md:
+
+| Region | Launch Stack |
+|--------|--------------|
+| us-east-1 | [![launch-stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home?region=us-east-1#/stacks/new?stackName=hcls-agent-toolkit&templateURL=https://5d1a4b76751b4c8a994ce96bafd91ec9-us-east-1.s3.us-east-1.amazonaws.com/public_assets_support_materials/hcls_agents_toolkit/Infra_cfn.yaml) |
+| us-west-2 | [![launch-stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home?region=us-west-2#/stacks/new?stackName=hcls-agent-toolkit&templateURL=https://5d1a4b76751b4c8a994ce96bafd91ec9-us-west-2.s3.us-west-2.amazonaws.com/public_assets_support_materials/hcls_agents_toolkit/Infra_cfn.yaml) |
+
+**Important Parameters:**
+- **ReactAppAllowedCidr**: Your IP address with /32 suffix (e.g., `192.168.1.100/32`)
+- **RedshiftPassword**: Secure password (8+ chars, mixed case, numbers)
+- **EnableBiomarkerAppInfrastructure**: Set to `true` (default)
+- **TavilyApiKey**: Optional, for web search capabilities
+- **USPTOApiKey**: Optional, for patent search capabilities
+
+### Option 2: Enhanced Deployment Script
+
+Use the provided deployment script for guided setup:
+
 ```bash
+cd /Users/lukewma/Documents/github/amazon-bedrock-agents-cancer-biomarker-discovery
 ./deploy-infrastructure.sh
 ```
 
-### Validation Only
-```bash
-./deploy-infrastructure.sh --validate-only
-```
+The script will:
+- Validate prerequisites and template
+- Prompt for required parameters
+- Package and deploy the infrastructure
+- Set up post-deployment configurations
+- Provide next steps and outputs
 
-### Custom Configuration
-```bash
-STACK_NAME=my-biomarker-app REGION=us-west-2 ./deploy-infrastructure.sh
-```
+### Option 3: AWS CLI Deployment
 
-### Delete Stack
+For advanced users or CI/CD integration:
+
 ```bash
-./deploy-infrastructure.sh --delete-stack
+# Set environment variables
+export BUCKET_NAME="your-packaging-bucket"
+export REGION="us-east-1"
+export STACK_NAME="hcls-agents-toolkit"
+export REDSHIFT_PASSWORD="YourSecurePassword123!"
+export REACT_APP_CIDR="192.168.1.0/24"
+
+# Package and deploy
+aws cloudformation package \
+  --template-file "infra_cfn.yaml" \
+  --s3-bucket $BUCKET_NAME \
+  --output-template-file "packaged_infra_cfn.yaml" \
+  --region $REGION
+
+aws cloudformation deploy \
+  --template-file "packaged_infra_cfn.yaml" \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --stack-name $STACK_NAME \
+  --region $REGION \
+  --parameter-overrides \
+    RedshiftPassword="$REDSHIFT_PASSWORD" \
+    ReactAppAllowedCidr="$REACT_APP_CIDR" \
+    EnableBiomarkerAppInfrastructure="true" \
+    ProjectName="biomarker-app" \
+    Environment="prod"
 ```
 
 ## Configuration Parameters
 
-The deployment script accepts these environment variables:
+### Required Parameters
+| Parameter | Description | Example |
+|-----------|-------------|---------|
+| `RedshiftPassword` | Redshift master password | `SecurePass123!` |
+| `ReactAppAllowedCidr` | CIDR for React app access | `192.168.1.0/24` |
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `STACK_NAME` | `biomarker-app-infrastructure` | CloudFormation stack name |
-| `REGION` | `us-east-1` | AWS deployment region |
-| `ENVIRONMENT` | `prod` | Environment tag (dev/staging/prod) |
-| `PROJECT_NAME` | `biomarker-app` | Project identifier |
+### Optional Parameters  
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `EnableBiomarkerAppInfrastructure` | `true` | Deploy enhanced infrastructure |
+| `ProjectName` | `biomarker-app` | Project identifier |
+| `Environment` | `prod` | Environment tag |
+| `TavilyApiKey` | `""` | Web search API key |
+| `USPTOApiKey` | `""` | Patent search API key |
+| `ExistingVpcId` | `""` | Use existing VPC |
+| `ExistingPublicSubnets` | `""` | Use existing public subnets |
+| `ExistingPrivateSubnets` | `""` | Use existing private subnets |
 
-## Integration with Existing Infrastructure
+## Post-Deployment Setup
 
-### Bedrock Agents Integration
-The new infrastructure integrates with your existing agents:
-
-- **Biomarker Database Analyst** (`UR5AFSSQXN`): Connects to new DynamoDB tables
-- **Clinical Evidence Researcher** (`Q3Y7J9OP5Q`): Uses new S3 buckets for document storage
-- **Medical Imaging Expert** (`IXQHQHQHQH`): Processes images through new Lambda functions
-- **Supervisor Agent** (`SUPERVISOR123`): Orchestrates workflows via Step Functions
-
-### Data Flow Architecture
-```
-User Request → API Gateway → Lambda → Bedrock Agents → Knowledge Bases → S3/DynamoDB
-                ↓
-Step Functions → Processing → Results → Amplify Frontend
-```
-
-## Post-Deployment Configuration
-
-### 1. Amplify Application Setup
+### 1. Access the React Application
 ```bash
-# Get Amplify app details
+# Get the application URL
 aws cloudformation describe-stacks \
-  --stack-name biomarker-app-infrastructure \
-  --query 'Stacks[0].Outputs[?OutputKey==`AmplifyAppId`].OutputValue' \
+  --stack-name hcls-agents-toolkit \
+  --query 'Stacks[0].Outputs[?OutputKey==`ReactAppExternalURL`].OutputValue' \
   --output text
 ```
 
-### 2. Cognito User Pool Configuration
+Add `http://` prefix to the URL and access in your browser.
+
+### 2. Test Enhanced Infrastructure
 ```bash
-# Create test user
-aws cognito-idp admin-create-user \
-  --user-pool-id <USER_POOL_ID> \
-  --username testuser \
-  --user-attributes Name=email,Value=test@example.com \
-  --temporary-password TempPass123!
+# Test literature search function
+aws lambda invoke \
+  --function-name biomarker-app-literature-search-prod \
+  --payload '{"query": "BRCA1 biomarker cancer", "max_results": 5}' \
+  response.json
+
+# Test HealthOmics integration function
+aws lambda invoke \
+  --function-name biomarker-app-healthomics-integration-prod \
+  --payload '{"operation": "list_stores"}' \
+  healthomics-response.json
+
+# Query specific variant store
+aws lambda invoke \
+  --function-name biomarker-app-healthomics-integration-prod \
+  --payload '{"operation": "query_variants", "biomarker": "BRCA1", "variant_store_id": "368016e44044"}' \
+  variant-response.json
+
+# Get genomic annotations
+aws lambda invoke \
+  --function-name biomarker-app-healthomics-integration-prod \
+  --payload '{"operation": "get_annotations", "biomarker": "BRCA1"}' \
+  annotation-response.json
+
+# Check DynamoDB tables
+aws dynamodb scan \
+  --table-name biomarker-app-metadata-prod \
+  --max-items 5
+
+# Test Step Functions workflow
+aws stepfunctions start-execution \
+  --state-machine-arn "arn:aws:states:region:account:stateMachine:biomarker-app-analysis-workflow-prod" \
+  --input '{"biomarker": "BRCA1", "analysis_type": "genomic_literature_review"}'
 ```
 
-### 3. S3 Data Upload
+### 3. Upload Sample Data
 ```bash
-# Upload sample biomarker data
-aws s3 cp sample-data/ s3://<BUCKET_NAME>/biomarker-data/ --recursive
+# Get bucket name
+BUCKET_NAME=$(aws cloudformation describe-stacks \
+  --stack-name hcls-agents-toolkit \
+  --query 'Stacks[0].Outputs[?OutputKey==`BiomarkerDataBucketName`].OutputValue' \
+  --output text)
+
+# Upload sample data
+aws s3 cp sample-data/ s3://$BUCKET_NAME/biomarker-data/ --recursive
 ```
 
-### 4. Test API Endpoints
-```bash
-# Test health check
-curl -X GET https://<API_GATEWAY_URL>/health
+## Integration with Existing Agents
 
-# Test biomarker analysis
-curl -X POST https://<API_GATEWAY_URL>/analyze \
-  -H "Content-Type: application/json" \
-  -d '{"biomarker": "BRCA1", "analysis_type": "variant"}'
-```
+The enhanced infrastructure automatically integrates with your existing Bedrock agents:
 
-## Security Considerations
+### Biomarker Database Analyst
+- **Agent ID**: Available in stack outputs
+- **Integration**: Connects to new DynamoDB tables for metadata storage
+- **Usage**: Invoke via Lambda functions or Step Functions
 
-### HIPAA Compliance
-- All data encrypted with KMS
-- VPC isolation for sensitive workloads
-- Audit logging enabled
-- Access controls implemented
+### Clinical Evidence Researcher  
+- **Agent ID**: Available in stack outputs
+- **Integration**: Uses new S3 buckets for document processing
+- **Usage**: Automated literature search and analysis
 
-### Best Practices Implemented
-- Least privilege IAM policies
-- Resource-based policies
-- Network segmentation
-- Encryption in transit and at rest
+### Medical Imaging Expert
+- **Agent ID**: Available in stack outputs  
+- **Integration**: Processes images through enhanced Lambda functions
+- **Usage**: Integrated into analysis workflows
 
 ## Monitoring and Troubleshooting
 
 ### CloudWatch Dashboards
-The deployment creates dashboards for:
-- Lambda function performance
-- API Gateway metrics
+The deployment creates monitoring dashboards for:
+- Lambda function performance and errors
 - Step Functions execution status
-- Bedrock agent invocations
+- API Gateway request metrics
+- DynamoDB table operations
+- S3 bucket access patterns
 
-### Common Issues
+### Common Issues and Solutions
 
-1. **VPC Connectivity**: Ensure your existing VPC has proper routing
-2. **IAM Permissions**: Verify Bedrock agent roles have necessary permissions
-3. **Resource Limits**: Check AWS service quotas in your region
+1. **Template Validation Errors**
+   ```bash
+   aws cloudformation validate-template --template-body file://infra_cfn.yaml
+   ```
+
+2. **Bedrock Model Access Issues**
+   - Verify model access in Bedrock console
+   - Check IAM permissions for Bedrock service
+
+3. **VPC Connectivity Problems**
+   - Ensure subnets have proper routing
+   - Check security group configurations
+   - Verify NAT Gateway for private subnets
+
+4. **Lambda Function Timeouts**
+   - Check CloudWatch logs for specific errors
+   - Increase memory allocation if needed
+   - Verify VPC configuration for external API access
 
 ### Debugging Commands
 ```bash
 # Check stack status
-aws cloudformation describe-stacks --stack-name biomarker-app-infrastructure
+aws cloudformation describe-stack-events --stack-name hcls-agents-toolkit
 
-# View stack events
-aws cloudformation describe-stack-events --stack-name biomarker-app-infrastructure
+# View Lambda logs
+aws logs describe-log-groups --log-group-name-prefix /aws/lambda/biomarker-app
 
-# Check Lambda logs
-aws logs describe-log-groups --log-group-name-prefix /aws/lambda/biomarker
+# Test agent connectivity
+aws bedrock-agent list-agents --region us-east-1
 
-# Test Bedrock agent connectivity
-aws bedrock-agent get-agent --agent-id UR5AFSSQXN
+# Check Step Functions executions
+aws stepfunctions list-executions --state-machine-arn <STATE_MACHINE_ARN>
 ```
+
+## Security and Compliance
+
+### HIPAA Compliance Features
+- **Encryption**: All data encrypted with KMS at rest and in transit
+- **Access Control**: IAM roles with least privilege principles
+- **Audit Logging**: CloudTrail and CloudWatch logging enabled
+- **Network Isolation**: VPC deployment with private subnets
+- **Data Retention**: Configurable TTL for temporary data
+
+### Security Best Practices
+- Regular security assessments
+- Monitoring for unusual access patterns
+- Automated backup and recovery procedures
+- Incident response planning
 
 ## Cost Optimization
 
 ### Resource Sizing
-- Lambda functions: Optimized memory allocation
-- DynamoDB: On-demand billing for variable workloads
-- S3: Intelligent tiering enabled
-- Step Functions: Express workflows for high-frequency operations
+- **Lambda**: Right-sized memory allocation based on workload
+- **DynamoDB**: On-demand billing for variable workloads  
+- **S3**: Intelligent tiering and lifecycle policies
+- **Step Functions**: Express workflows for high-frequency operations
 
 ### Estimated Monthly Costs
-- Development: $50-100
-- Production: $200-500
-- Enterprise: $500-1000+
+- **Development Environment**: $100-200
+- **Production Environment**: $300-800
+- **Enterprise Scale**: $800-2000+
 
-*Costs vary based on usage patterns and data volume*
+*Costs vary significantly based on usage patterns, data volume, and agent invocation frequency*
 
-## Cleanup
+## Cleanup and Maintenance
 
-To remove all deployed resources:
+### Complete Stack Deletion
 ```bash
 ./deploy-infrastructure.sh --delete-stack
 ```
 
-**Warning**: This will delete all data in the created resources. Ensure you have backups if needed.
+**Warning**: This deletes all resources and data. Ensure backups exist.
 
-## Support and Troubleshooting
+### Selective Resource Management
+```bash
+# Disable enhanced infrastructure only
+aws cloudformation update-stack \
+  --stack-name hcls-agents-toolkit \
+  --use-previous-template \
+  --parameters ParameterKey=EnableBiomarkerAppInfrastructure,ParameterValue=false
+```
 
-### Log Locations
-- CloudFormation: AWS Console → CloudFormation → Events
-- Lambda: CloudWatch → Log Groups → `/aws/lambda/`
-- API Gateway: CloudWatch → Log Groups → `API-Gateway-Execution-Logs`
+## Support and Next Steps
 
 ### Getting Help
-1. Check CloudFormation stack events for deployment issues
-2. Review CloudWatch logs for runtime errors
-3. Validate IAM permissions for access issues
-4. Ensure VPC configuration allows required connectivity
+1. **AWS Documentation**: [Bedrock Agents User Guide](https://docs.aws.amazon.com/bedrock/latest/userguide/agents.html)
+2. **CloudFormation Events**: Check stack events for deployment issues
+3. **CloudWatch Logs**: Review function logs for runtime errors
+4. **AWS Support**: Contact AWS Support for infrastructure issues
 
-## Next Steps
+### Recommended Next Steps
+1. **Configure Monitoring**: Set up CloudWatch alarms and SNS notifications
+2. **Load Testing**: Validate performance with expected workloads
+3. **Security Review**: Conduct thorough security assessment
+4. **User Training**: Train team members on new capabilities
+5. **Documentation**: Update internal documentation with new endpoints and workflows
 
-After successful deployment:
+### Integration Examples
 
-1. **Configure Monitoring**: Set up CloudWatch alarms and notifications
-2. **Load Test**: Validate performance with expected workloads
-3. **Security Review**: Conduct security assessment
-4. **Documentation**: Update team documentation with new endpoints
-5. **Training**: Train users on new application features
-
-## Integration Examples
-
-### Python SDK Usage
+#### Python SDK Usage
 ```python
 import boto3
+import json
 
 # Initialize clients
-bedrock = boto3.client('bedrock-agent-runtime')
-s3 = boto3.client('s3')
+bedrock_runtime = boto3.client('bedrock-agent-runtime')
+lambda_client = boto3.client('lambda')
+stepfunctions = boto3.client('stepfunctions')
 
-# Invoke biomarker analysis agent
-response = bedrock.invoke_agent(
-    agentId='UR5AFSSQXN',
-    agentAliasId='TSTALIASID',
-    sessionId='session-123',
-    inputText='Analyze BRCA1 variants for patient cohort'
+# Invoke literature search
+response = lambda_client.invoke(
+    FunctionName='biomarker-app-literature-search-prod',
+    Payload=json.dumps({
+        'query': 'BRCA1 variants clinical significance',
+        'max_results': 10
+    })
+)
+
+# Start analysis workflow
+execution = stepfunctions.start_execution(
+    stateMachineArn='arn:aws:states:region:account:stateMachine:biomarker-app-analysis-workflow-prod',
+    input=json.dumps({
+        'biomarker': 'BRCA1',
+        'analysis_type': 'comprehensive'
+    })
 )
 ```
 
-### API Integration
-```javascript
-// Frontend integration example
-const analyzeData = async (biomarkerData) => {
-  const response = await fetch('/api/analyze', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${authToken}`
-    },
-    body: JSON.stringify(biomarkerData)
-  });
-  return response.json();
-};
+#### REST API Usage
+```bash
+# Get API Gateway URL from stack outputs
+API_URL=$(aws cloudformation describe-stacks \
+  --stack-name hcls-agents-toolkit \
+  --query 'Stacks[0].Outputs[?OutputKey==`BiomarkerAPIId`].OutputValue' \
+  --output text)
+
+# Make API calls (when endpoints are configured)
+curl -X POST https://$API_URL.execute-api.region.amazonaws.com/prod/analyze \
+  -H "Content-Type: application/json" \
+  -d '{"biomarker": "BRCA1", "analysis_type": "variant"}'
 ```
 
-This deployment enhances your existing sophisticated biomarker discovery platform with additional automation, user interfaces, and workflow capabilities while maintaining the security and compliance standards already established in your infrastructure.
+This enhanced deployment provides a comprehensive platform for healthcare and life sciences research, combining the power of multi-agent AI systems with robust data processing and analysis capabilities.

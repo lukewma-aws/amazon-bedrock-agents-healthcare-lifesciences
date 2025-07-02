@@ -1,0 +1,229 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Biomarker Application Lambda Functions'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Description: "Project name for resource tagging and naming"
+    Default: "biomarker-app"
+  
+  Environment:
+    Type: String
+    Description: "Environment name (dev, staging, prod)"
+    Default: "prod"
+    
+  VpcId:
+    Type: String
+    Description: "VPC ID for Lambda functions"
+    
+  PrivateSubnetIds:
+    Type: CommaDelimitedList
+    Description: "Private subnet IDs for Lambda functions"
+    
+  DefaultSecurityGroupId:
+    Type: String
+    Description: "Default security group ID"
+    Default: ""
+    
+  KMSKeyId:
+    Type: String
+    Description: "KMS Key ID for encryption"
+    
+  MetadataTableName:
+    Type: String
+    Description: "DynamoDB metadata table name"
+    
+  ResultsTableName:
+    Type: String
+    Description: "DynamoDB results table name"
+    
+  DataBucketName:
+    Type: String
+    Description: "S3 data bucket name"
+    
+  ProcessedBucketName:
+    Type: String
+    Description: "S3 processed data bucket name"
+
+Conditions:
+  HasSecurityGroup: !Not [!Equals [!Ref DefaultSecurityGroupId, ""]]
+
+Resources:
+  ##################################################################
+  # IAM Role for Lambda functions
+  ##################################################################
+  BiomarkerLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-lambda-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: BiomarkerLambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "${DataBucketName}/*"
+                  - !Sub "${ProcessedBucketName}/*"
+                  - !Sub "arn:aws:s3:::${DataBucketName}"
+                  - !Sub "arn:aws:s3:::${ProcessedBucketName}"
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${MetadataTableName}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ResultsTableName}"
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeAgent
+                  - bedrock:InvokeModel
+                  - bedrock:GetAgent
+                  - bedrock:ListAgents
+                Resource:
+                  - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent/*"
+                  - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent-alias/*"
+                  - !Sub "arn:aws:bedrock:*::foundation-model/*"
+              - Effect: Allow
+                Action:
+                  - omics:GetVariantStore
+                  - omics:ListVariantStores
+                  - omics:ListVariantImportJobs
+                  - omics:GetVariantImportJob
+                  - omics:GetAnnotationStore
+                  - omics:ListAnnotationStores
+                  - omics:GetReferenceStore
+                  - omics:ListReferenceStores
+                  - omics:GetWorkflow
+                  - omics:ListWorkflows
+                  - omics:GetRun
+                  - omics:ListRuns
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - kms:Encrypt
+                  - kms:Decrypt
+                  - kms:ReEncrypt*
+                  - kms:GenerateDataKey*
+                  - kms:DescribeKey
+                Resource: !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/${KMSKeyId}"
+              - Effect: Allow
+                Action:
+                  - states:StartExecution
+                  - states:DescribeExecution
+                  - states:StopExecution
+                Resource: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${ProjectName}-*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+      Tags:
+        - Key: Project
+          Value: "hcls-agents-toolkit"
+        - Key: Environment
+          Value: !Ref Environment
+
+  ##################################################################
+  # Lambda Functions
+  ##################################################################
+  ScientificLiteratureSearchFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-literature-search-${Environment}"
+      Runtime: python3.11
+      Handler: literature-search.lambda_handler
+      Role: !GetAtt BiomarkerLambdaRole.Arn
+      Timeout: 300
+      MemorySize: 1024
+      Environment:
+        Variables:
+          METADATA_TABLE: !Ref MetadataTableName
+          RESULTS_TABLE: !Ref ResultsTableName
+          DATA_BUCKET: !Ref DataBucketName
+          KMS_KEY_ID: !Ref KMSKeyId
+      VpcConfig:
+        SecurityGroupIds:
+          - !If [HasSecurityGroup, !Ref DefaultSecurityGroupId, !Ref "AWS::NoValue"]
+        SubnetIds: !Ref PrivateSubnetIds
+      Code:
+        ZipFile: |
+          # Placeholder - will be replaced by deployment script
+          import json
+          def lambda_handler(event, context):
+              return {'statusCode': 200, 'body': json.dumps('Placeholder function')}
+      Tags:
+        - Key: Project
+          Value: "hcls-agents-toolkit"
+        - Key: Environment
+          Value: !Ref Environment
+
+  DataProcessingFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-data-processing-${Environment}"
+      Runtime: python3.11
+      Handler: data-processing.lambda_handler
+      Role: !GetAtt BiomarkerLambdaRole.Arn
+      Timeout: 900
+      MemorySize: 2048
+      Environment:
+        Variables:
+          METADATA_TABLE: !Ref MetadataTableName
+          RESULTS_TABLE: !Ref ResultsTableName
+          DATA_BUCKET: !Ref DataBucketName
+          PROCESSED_BUCKET: !Ref ProcessedBucketName
+          KMS_KEY_ID: !Ref KMSKeyId
+      VpcConfig:
+        SecurityGroupIds:
+          - !If [HasSecurityGroup, !Ref DefaultSecurityGroupId, !Ref "AWS::NoValue"]
+        SubnetIds: !Ref PrivateSubnetIds
+      Code:
+        ZipFile: |
+          # Placeholder - will be replaced by deployment script
+          import json
+          def lambda_handler(event, context):
+              return {'statusCode': 200, 'body': json.dumps('Placeholder function')}
+      Tags:
+        - Key: Project
+          Value: "hcls-agents-toolkit"
+        - Key: Environment
+          Value: !Ref Environment
+
+Outputs:
+  BiomarkerLambdaRoleArn:
+    Description: "ARN of the biomarker Lambda role"
+    Value: !GetAtt BiomarkerLambdaRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-LambdaRole"
+      
+  ScientificLiteratureSearchFunctionArn:
+    Description: "ARN of the scientific literature search Lambda function"
+    Value: !GetAtt ScientificLiteratureSearchFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-LiteratureFunction"
+      
+  DataProcessingFunctionArn:
+    Description: "ARN of the data processing Lambda function"
+    Value: !GetAtt DataProcessingFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-DataProcessingFunction"

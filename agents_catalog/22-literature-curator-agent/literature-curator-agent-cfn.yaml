@@ -62,8 +62,9 @@ Resources:
 
   PubMedSearchLambdaFunction:
     Type: AWS::Lambda::Function
+    #DeletionPolicy: Retain
     Properties:
-      FunctionName: !Sub "${AWS::StackName}-PubMedSearch"
+      FunctionName: "PubMedSearch"
       Role: !GetAtt PubMedSearchLambdaRole.Arn
       Runtime: python3.12
       Handler: lambda_function.lambda_handler
@@ -265,6 +266,7 @@ Resources:
 
   LiteratureCuratorAgent:
     Type: AWS::Bedrock::Agent
+    #DeletionPolicy: Retain
     Properties:
       ActionGroups:
         - ActionGroupName: "UserInputAction"

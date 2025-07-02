@@ -103,8 +103,9 @@ Resources:
 
   AthenaQueryLambdaFunction:
     Type: AWS::Lambda::Function
+    #DeletionPolicy: Retain
     Properties:
-      FunctionName: !Sub "${AWS::StackName}-AthenaQuery"
+      FunctionName: !Sub "AthenaQuery"
       Role: !GetAtt AthenaQueryLambdaRole.Arn
       Runtime: python3.12
       Handler: lambda_function.lambda_handler
@@ -388,6 +389,7 @@ Resources:
 
   AthenaSQLGeneratorAgent:
     Type: AWS::Bedrock::Agent
+    #DeletionPolicy: Retain
     Properties:
       ActionGroups:
         - ActionGroupName: "UserInputAction"

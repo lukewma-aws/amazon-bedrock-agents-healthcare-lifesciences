@@ -1,0 +1,282 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'HealthOmics Integration for Biomarker Application'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Description: "Project name for resource tagging and naming"
+    Default: "biomarker-app"
+  
+  Environment:
+    Type: String
+    Description: "Environment name (dev, staging, prod)"
+    Default: "prod"
+    
+  VpcId:
+    Type: String
+    Description: "VPC ID for Lambda functions"
+    
+  PrivateSubnetIds:
+    Type: CommaDelimitedList
+    Description: "Private subnet IDs for Lambda functions"
+    
+  DefaultSecurityGroupId:
+    Type: String
+    Description: "Default security group ID"
+    Default: ""
+    
+  KMSKeyId:
+    Type: String
+    Description: "KMS Key ID for encryption"
+    
+  MetadataTableName:
+    Type: String
+    Description: "DynamoDB metadata table name"
+    
+  ResultsTableName:
+    Type: String
+    Description: "DynamoDB results table name"
+    
+  DataBucketName:
+    Type: String
+    Description: "S3 data bucket name"
+    
+  ProcessedBucketName:
+    Type: String
+    Description: "S3 processed data bucket name"
+
+Conditions:
+  HasSecurityGroup: !Not [!Equals [!Ref DefaultSecurityGroupId, ""]]
+
+Resources:
+  ##################################################################
+  # HealthOmics Integration - Reference Existing Resources
+  ##################################################################
+
+  # Store existing HealthOmics resource IDs as SSM parameters for easy reference
+  HealthOmicsReferenceStoreId:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${ProjectName}/${Environment}/healthomics/reference-store-id"
+      Value: "2289344333"
+      Type: String
+      Description: "Existing HealthOmics Reference Store ID"
+      Tags:
+        Project: "hcls-agents-toolkit"
+        Environment: !Ref Environment
+
+  HealthOmicsVariantStore2Id:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${ProjectName}/${Environment}/healthomics/variant-store-2-id"
+      Value: "2980d1e0d667"
+      Type: String
+      Description: "Existing HealthOmics Variant Store 2 ID (my_variant_store_2)"
+      Tags:
+        Project: "hcls-agents-toolkit"
+        Environment: !Ref Environment
+
+  HealthOmicsVariantStore3Id:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${ProjectName}/${Environment}/healthomics/variant-store-3-id"
+      Value: "8cd35661f78f"
+      Type: String
+      Description: "Existing HealthOmics Variant Store 3 ID (my_variant_store_3)"
+      Tags:
+        Project: "hcls-agents-toolkit"
+        Environment: !Ref Environment
+
+  HealthOmicsVariantStore4Id:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${ProjectName}/${Environment}/healthomics/variant-store-4-id"
+      Value: "368016e44044"
+      Type: String
+      Description: "Existing HealthOmics Variant Store 4 ID (my_variant_store_4)"
+      Tags:
+        Project: "hcls-agents-toolkit"
+        Environment: !Ref Environment
+
+  HealthOmicsAnnotationStoreId:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${ProjectName}/${Environment}/healthomics/annotation-store-id"
+      Value: "1aead2db2d7f"
+      Type: String
+      Description: "Existing HealthOmics Annotation Store ID (my_annotation_store)"
+      Tags:
+        Project: "hcls-agents-toolkit"
+        Environment: !Ref Environment
+
+  HealthOmicsGATKWorkflowId:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${ProjectName}/${Environment}/healthomics/gatk-workflow-id"
+      Value: "2403822"
+      Type: String
+      Description: "Existing HealthOmics GATK Variant Discovery Workflow ID"
+      Tags:
+        Project: "hcls-agents-toolkit"
+        Environment: !Ref Environment
+
+  HealthOmicsSampleWorkflowId:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${ProjectName}/${Environment}/healthomics/sample-workflow-id"
+      Value: "8567133"
+      Type: String
+      Description: "Existing HealthOmics Sample Workflow ID"
+      Tags:
+        Project: "hcls-agents-toolkit"
+        Environment: !Ref Environment
+
+  ##################################################################
+  # IAM Role for HealthOmics Lambda function
+  ##################################################################
+  HealthOmicsLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-healthomics-lambda-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: HealthOmicsLambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - omics:GetVariantStore
+                  - omics:ListVariantStores
+                  - omics:ListVariantImportJobs
+                  - omics:GetVariantImportJob
+                  - omics:GetAnnotationStore
+                  - omics:ListAnnotationStores
+                  - omics:ListAnnotationImportJobs
+                  - omics:GetAnnotationImportJob
+                  - omics:GetReferenceStore
+                  - omics:ListReferenceStores
+                  - omics:GetWorkflow
+                  - omics:ListWorkflows
+                  - omics:GetRun
+                  - omics:ListRuns
+                  - omics:StartRun
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::${DataBucketName}/*"
+                  - !Sub "arn:aws:s3:::${ProcessedBucketName}/*"
+                  - !Sub "arn:aws:s3:::${DataBucketName}"
+                  - !Sub "arn:aws:s3:::${ProcessedBucketName}"
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${MetadataTableName}"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ResultsTableName}"
+              - Effect: Allow
+                Action:
+                  - kms:Encrypt
+                  - kms:Decrypt
+                  - kms:ReEncrypt*
+                  - kms:GenerateDataKey*
+                  - kms:DescribeKey
+                Resource: !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/${KMSKeyId}"
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}/${Environment}/healthomics/*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+      Tags:
+        - Key: Project
+          Value: "hcls-agents-toolkit"
+        - Key: Environment
+          Value: !Ref Environment
+
+  ##################################################################
+  # Enhanced Lambda function for HealthOmics integration
+  ##################################################################
+  HealthOmicsIntegrationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-healthomics-integration-${Environment}"
+      Runtime: python3.11
+      Handler: healthomics-integration.lambda_handler
+      Role: !GetAtt HealthOmicsLambdaRole.Arn
+      Timeout: 900
+      MemorySize: 1024
+      Environment:
+        Variables:
+          REFERENCE_STORE_ID: "2289344333"
+          VARIANT_STORE_2_ID: "2980d1e0d667"
+          VARIANT_STORE_3_ID: "8cd35661f78f"
+          VARIANT_STORE_4_ID: "368016e44044"
+          ANNOTATION_STORE_ID: "1aead2db2d7f"
+          GATK_WORKFLOW_ID: "2403822"
+          SAMPLE_WORKFLOW_ID: "8567133"
+          METADATA_TABLE: !Ref MetadataTableName
+          RESULTS_TABLE: !Ref ResultsTableName
+          DATA_BUCKET: !Ref DataBucketName
+          KMS_KEY_ID: !Ref KMSKeyId
+      VpcConfig:
+        SecurityGroupIds:
+          - !If [HasSecurityGroup, !Ref DefaultSecurityGroupId, !Ref "AWS::NoValue"]
+        SubnetIds: !Ref PrivateSubnetIds
+      Code:
+        ZipFile: |
+          # Placeholder - will be replaced by deployment script
+          import json
+          def lambda_handler(event, context):
+              return {'statusCode': 200, 'body': json.dumps('Placeholder function')}
+      Tags:
+        - Key: Project
+          Value: "hcls-agents-toolkit"
+        - Key: Environment
+          Value: !Ref Environment
+
+Outputs:
+  HealthOmicsIntegrationFunctionArn:
+    Description: "ARN of the HealthOmics integration Lambda function"
+    Value: !GetAtt HealthOmicsIntegrationFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-HealthOmicsFunction"
+      
+  HealthOmicsLambdaRoleArn:
+    Description: "ARN of the HealthOmics Lambda role"
+    Value: !GetAtt HealthOmicsLambdaRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-HealthOmicsRole"
+      
+  HealthOmicsResourceSummary:
+    Description: "Summary of integrated HealthOmics resources"
+    Value: !Sub |
+      Reference Store: 2289344333
+      Variant Stores: 2980d1e0d667, 8cd35661f78f, 368016e44044
+      Annotation Store: 1aead2db2d7f
+      Workflows: 2403822 (GATK), 8567133 (Sample)
+    Export:
+      Name: !Sub "${AWS::StackName}-ResourceSummary"

@@ -135,6 +135,18 @@ Resources:
       VpcId: !Ref VPC
       InternetGatewayId: !Ref InternetGateway
 
+  DefaultSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Default security group for VPC
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: -1
+          SourceSecurityGroupId: !Ref AWS::NoValue
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
 Outputs:
   VPC:
     Value: !Ref VPC
@@ -151,3 +163,6 @@ Outputs:
   PublicSubnet2:
     Value: !Ref PublicSubnet2
     Description: Public subnet 2 ID
+  DefaultSecurityGroup:
+    Value: !Ref DefaultSecurityGroup
+    Description: Default security group ID

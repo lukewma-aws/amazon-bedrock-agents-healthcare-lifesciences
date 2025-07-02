@@ -1,339 +1,223 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'Biomarker Application Infrastructure - Generated from existing AWS resources'
-Metadata:
-  GeneratedFrom: 'AWS Resource Discovery'
-  LastUpdated: '2025-06-30'
-  Environment: 'Production'
-  Purpose: 'Healthcare Biomarker Discovery Application Infrastructure'
+Description: 'Enhanced Biomarker Application Infrastructure with HealthOmics Integration'
 
 Parameters:
-  Environment:
-    Type: String
-    Default: 'prod'
-    AllowedValues: ['dev', 'staging', 'prod']
-    Description: 'Environment name for resource naming'
-  
   ProjectName:
     Type: String
-    Default: 'biomarker-app'
-    Description: 'Project name for resource naming'
+    Description: "Project name for resource tagging and naming"
+    Default: "biomarker-app"
+  
+  Environment:
+    Type: String
+    Description: "Environment name (dev, staging, prod)"
+    Default: "prod"
+    AllowedValues:
+      - "dev"
+      - "staging" 
+      - "prod"
   
   VpcId:
-    Type: AWS::EC2::VPC::Id
-    Description: 'VPC ID for resource deployment'
-    Default: 'vpc-0640bbe32a3af7163'
-  
+    Type: String
+    Description: "VPC ID for Lambda functions"
+    
   PrivateSubnetIds:
     Type: CommaDelimitedList
-    Description: 'Private subnet IDs for Lambda and RDS deployment'
-  
-  PublicSubnetIds:
-    Type: CommaDelimitedList
-    Description: 'Public subnet IDs for ALB and NAT Gateway'
-  
-  RedshiftClusterIdentifier:
+    Description: "Private subnet IDs for Lambda functions"
+    
+  DefaultSecurityGroupId:
     Type: String
-    Default: 'biomarker-redshift-cluster'
-    Description: 'Existing Redshift cluster identifier'
-  
-  BedrockAgentRoleArn:
+    Description: "Default security group ID"
+    Default: ""
+    
+  AgentRoleArn:
     Type: String
-    Description: 'Existing Bedrock Agent Role ARN'
-    Default: 'arn:aws:iam::796973485077:role/AmazonBedrockExecutionRoleForAgents_796973485077'
-  
-  KMSKeyId:
-    Type: String
-    Description: 'KMS Key ID for encryption'
-    Default: 'alias/aws/s3'
-
-Conditions:
-  IsProd: !Equals [!Ref Environment, 'prod']
-  IsNotProd: !Not [!Equals [!Ref Environment, 'prod']]
+    Description: "ARN of the existing Bedrock agent role"
 
 Resources:
-  # ========================================
-  # S3 BUCKETS
-  # ========================================
-  
+  ##################################################################
+  # KMS Key for encryption
+  ##################################################################
+  BiomarkerKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: "KMS key for biomarker application encryption"
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: Allow use of the key for Lambda and Step Functions
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+                - states.amazonaws.com
+                - s3.amazonaws.com
+                - dynamodb.amazonaws.com
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: '*'
+      Tags:
+        - Key: Project
+          Value: "hcls-agents-toolkit"
+        - Key: Environment
+          Value: !Ref Environment
+
+  BiomarkerKMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${ProjectName}-${Environment}-key"
+      TargetKeyId: !Ref BiomarkerKMSKey
+
+  ##################################################################
+  # S3 Buckets
+  ##################################################################
   BiomarkerDataBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub '${ProjectName}-data-${Environment}-${AWS::AccountId}-${AWS::Region}'
+      BucketName: !Sub "${ProjectName}-data-${AWS::AccountId}-${AWS::Region}"
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
-              SSEAlgorithm: AES256
-            BucketKeyEnabled: true
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicReadWrite: true
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref BiomarkerKMSKey
       VersioningConfiguration:
         Status: Enabled
       LifecycleConfiguration:
         Rules:
-          - Id: DeleteIncompleteMultipartUploads
-            Status: Enabled
-            AbortIncompleteMultipartUpload:
-              DaysAfterInitiation: 7
           - Id: TransitionToIA
             Status: Enabled
-            Transition:
-              Days: 30
-              StorageClass: STANDARD_IA
-          - Id: TransitionToGlacier
-            Status: Enabled
-            Transition:
-              Days: 90
-              StorageClass: GLACIER
-      NotificationConfiguration:
-        LambdaConfigurations:
-          - Event: s3:ObjectCreated:*
-            Function: !GetAtt DataProcessingLambda.Arn
-            Filter:
-              S3Key:
-                Rules:
-                  - Name: prefix
-                    Value: 'biomarker-data/'
-                  - Name: suffix
-                    Value: '.csv'
-      Tags:
-        - Key: Environment
-          Value: !Ref Environment
-        - Key: Project
-          Value: !Ref ProjectName
-        - Key: Purpose
-          Value: 'Biomarker data storage'
-
-  AthenaOutputBucket:
-    Type: AWS::S3::Bucket
-    Properties:
-      BucketName: !Sub '${ProjectName}-athena-output-${Environment}-${AWS::AccountId}-${AWS::Region}'
-      BucketEncryption:
-        ServerSideEncryptionConfiguration:
-          - ServerSideEncryptionByDefault:
-              SSEAlgorithm: AES256
-            BucketKeyEnabled: true
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+              - TransitionInDays: 90
+                StorageClass: GLACIER
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
         IgnorePublicAcls: true
-        RestrictPublicReadWrite: true
-      LifecycleConfiguration:
-        Rules:
-          - Id: DeleteOldQueryResults
-            Status: Enabled
-            ExpirationInDays: 30
+        RestrictPublicBuckets: true
       Tags:
+        - Key: Project
+          Value: "hcls-agents-toolkit"
         - Key: Environment
           Value: !Ref Environment
-        - Key: Project
-          Value: !Ref ProjectName
-        - Key: Purpose
-          Value: 'Athena query results'
 
-  KnowledgeBaseBucket:
+  ProcessedDataBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub '${ProjectName}-knowledge-base-${Environment}-${AWS::AccountId}-${AWS::Region}'
+      BucketName: !Sub "${ProjectName}-processed-${AWS::AccountId}-${AWS::Region}"
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
-              SSEAlgorithm: AES256
-            BucketKeyEnabled: true
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicReadWrite: true
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref BiomarkerKMSKey
       VersioningConfiguration:
         Status: Enabled
-      NotificationConfiguration:
-        LambdaConfigurations:
-          - Event: s3:ObjectCreated:*
-            Function: !GetAtt KnowledgeBaseSyncLambda.Arn
-            Filter:
-              S3Key:
-                Rules:
-                  - Name: prefix
-                    Value: 'documents/'
-                  - Name: suffix
-                    Value: '.pdf'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
       Tags:
+        - Key: Project
+          Value: "hcls-agents-toolkit"
         - Key: Environment
           Value: !Ref Environment
-        - Key: Project
-          Value: !Ref ProjectName
-        - Key: Purpose
-          Value: 'Knowledge base document storage'
 
-  # ========================================
-  # DYNAMODB TABLES
-  # ========================================
-  
-  ScientificLiteratureTable:
+  ##################################################################
+  # DynamoDB Tables
+  ##################################################################
+  BiomarkerMetadataTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: !Sub '${ProjectName}-scientific-literature-${Environment}'
-      BillingMode: PAY_PER_REQUEST
+      TableName: !Sub "${ProjectName}-metadata-${Environment}"
+      BillingMode: ON_DEMAND
       AttributeDefinitions:
-        - AttributeName: 'question_id'
-          AttributeType: 'S'
-        - AttributeName: 'timestamp'
-          AttributeType: 'N'
-        - AttributeName: 'user_id'
-          AttributeType: 'S'
+        - AttributeName: biomarker_id
+          AttributeType: S
+        - AttributeName: analysis_type
+          AttributeType: S
       KeySchema:
-        - AttributeName: 'question_id'
-          KeyType: 'HASH'
-        - AttributeName: 'timestamp'
-          KeyType: 'RANGE'
-      GlobalSecondaryIndexes:
-        - IndexName: 'UserIndex'
-          KeySchema:
-            - AttributeName: 'user_id'
-              KeyType: 'HASH'
-            - AttributeName: 'timestamp'
-              KeyType: 'RANGE'
-          Projection:
-            ProjectionType: 'ALL'
-      StreamSpecification:
-        StreamViewType: 'NEW_AND_OLD_IMAGES'
-      PointInTimeRecoverySpecification:
-        PointInTimeRecoveryEnabled: true
+        - AttributeName: biomarker_id
+          KeyType: HASH
+        - AttributeName: analysis_type
+          KeyType: RANGE
       SSESpecification:
         SSEEnabled: true
+        KMSMasterKeyId: !Ref BiomarkerKMSKey
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       Tags:
+        - Key: Project
+          Value: "hcls-agents-toolkit"
         - Key: Environment
           Value: !Ref Environment
-        - Key: Project
-          Value: !Ref ProjectName
-        - Key: Purpose
-          Value: 'Scientific literature questions and responses'
 
-  PromptCatalogTable:
+  AnalysisResultsTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: !Sub '${ProjectName}-prompt-catalog-${Environment}'
-      BillingMode: PAY_PER_REQUEST
+      TableName: !Sub "${ProjectName}-results-${Environment}"
+      BillingMode: ON_DEMAND
       AttributeDefinitions:
-        - AttributeName: 'prompt_id'
-          AttributeType: 'S'
-        - AttributeName: 'category'
-          AttributeType: 'S'
-        - AttributeName: 'version'
-          AttributeType: 'N'
+        - AttributeName: analysis_id
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
       KeySchema:
-        - AttributeName: 'prompt_id'
-          KeyType: 'HASH'
-        - AttributeName: 'version'
-          KeyType: 'RANGE'
-      GlobalSecondaryIndexes:
-        - IndexName: 'CategoryIndex'
-          KeySchema:
-            - AttributeName: 'category'
-              KeyType: 'HASH'
-            - AttributeName: 'version'
-              KeyType: 'RANGE'
-          Projection:
-            ProjectionType: 'ALL'
-      PointInTimeRecoverySpecification:
-        PointInTimeRecoveryEnabled: true
+        - AttributeName: analysis_id
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
       SSESpecification:
         SSEEnabled: true
-      Tags:
-        - Key: Environment
-          Value: !Ref Environment
-        - Key: Project
-          Value: !Ref ProjectName
-        - Key: Purpose
-          Value: 'Prompt templates and configurations'
-
-  BiomarkerAnalysisResultsTable:
-    Type: AWS::DynamoDB::Table
-    Properties:
-      TableName: !Sub '${ProjectName}-analysis-results-${Environment}'
-      BillingMode: PAY_PER_REQUEST
-      AttributeDefinitions:
-        - AttributeName: 'analysis_id'
-          AttributeType: 'S'
-        - AttributeName: 'created_at'
-          AttributeType: 'N'
-        - AttributeName: 'user_id'
-          AttributeType: 'S'
-        - AttributeName: 'status'
-          AttributeType: 'S'
-      KeySchema:
-        - AttributeName: 'analysis_id'
-          KeyType: 'HASH'
-      GlobalSecondaryIndexes:
-        - IndexName: 'UserAnalysisIndex'
-          KeySchema:
-            - AttributeName: 'user_id'
-              KeyType: 'HASH'
-            - AttributeName: 'created_at'
-              KeyType: 'RANGE'
-          Projection:
-            ProjectionType: 'ALL'
-        - IndexName: 'StatusIndex'
-          KeySchema:
-            - AttributeName: 'status'
-              KeyType: 'HASH'
-            - AttributeName: 'created_at'
-              KeyType: 'RANGE'
-          Projection:
-            ProjectionType: 'ALL'
-      StreamSpecification:
-        StreamViewType: 'NEW_AND_OLD_IMAGES'
+        KMSMasterKeyId: !Ref BiomarkerKMSKey
       PointInTimeRecoverySpecification:
         PointInTimeRecoveryEnabled: true
-      SSESpecification:
-        SSEEnabled: true
       TimeToLiveSpecification:
-        AttributeName: 'ttl'
+        AttributeName: ttl
         Enabled: true
       Tags:
+        - Key: Project
+          Value: "hcls-agents-toolkit"
         - Key: Environment
           Value: !Ref Environment
-        - Key: Project
-          Value: !Ref ProjectName
-        - Key: Purpose
-          Value: 'Biomarker analysis results and metadata'
 
 Outputs:
+  BiomarkerKMSKeyId:
+    Description: "KMS Key ID for biomarker application"
+    Value: !Ref BiomarkerKMSKey
+    Export:
+      Name: !Sub "${AWS::StackName}-KMSKey"
+      
   BiomarkerDataBucketName:
-    Description: 'Biomarker data S3 bucket name'
+    Description: "S3 bucket for biomarker data storage"
     Value: !Ref BiomarkerDataBucket
     Export:
-      Name: !Sub '${AWS::StackName}-BiomarkerDataBucket'
-  
-  AthenaOutputBucketName:
-    Description: 'Athena output S3 bucket name'
-    Value: !Ref AthenaOutputBucket
+      Name: !Sub "${AWS::StackName}-DataBucket"
+      
+  ProcessedDataBucketName:
+    Description: "S3 bucket for processed data storage"
+    Value: !Ref ProcessedDataBucket
     Export:
-      Name: !Sub '${AWS::StackName}-AthenaOutputBucket'
-  
-  KnowledgeBaseBucketName:
-    Description: 'Knowledge base S3 bucket name'
-    Value: !Ref KnowledgeBaseBucket
+      Name: !Sub "${AWS::StackName}-ProcessedBucket"
+      
+  BiomarkerMetadataTableName:
+    Description: "DynamoDB table for biomarker metadata"
+    Value: !Ref BiomarkerMetadataTable
     Export:
-      Name: !Sub '${AWS::StackName}-KnowledgeBaseBucket'
-  
-  ScientificLiteratureTableName:
-    Description: 'Scientific literature DynamoDB table name'
-    Value: !Ref ScientificLiteratureTable
+      Name: !Sub "${AWS::StackName}-MetadataTable"
+      
+  AnalysisResultsTableName:
+    Description: "DynamoDB table for analysis results"
+    Value: !Ref AnalysisResultsTable
     Export:
-      Name: !Sub '${AWS::StackName}-ScientificLiteratureTable'
-  
-  PromptCatalogTableName:
-    Description: 'Prompt catalog DynamoDB table name'
-    Value: !Ref PromptCatalogTable
-    Export:
-      Name: !Sub '${AWS::StackName}-PromptCatalogTable'
-  
-  BiomarkerAnalysisResultsTableName:
-    Description: 'Biomarker analysis results DynamoDB table name'
-    Value: !Ref BiomarkerAnalysisResultsTable
-    Export:
-      Name: !Sub '${AWS::StackName}-BiomarkerAnalysisResultsTable'
+      Name: !Sub "${AWS::StackName}-ResultsTable"

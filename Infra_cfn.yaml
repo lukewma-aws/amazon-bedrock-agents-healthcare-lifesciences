@@ -61,6 +61,33 @@ Parameters:
     Type: CommaDelimitedList
     Description: "A list of 2 private subnet IDs in your AWS account and AWS region from two different AZs are required."
     Default: ""
+  EnableBiomarkerAppInfrastructure:
+    Type: String
+    Description: "Deploy additional biomarker application infrastructure (API Gateway, Step Functions, additional Lambda functions)"
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+  ProjectName:
+    Type: String
+    Description: "Project name for resource tagging and naming"
+    Default: "biomarker-app"
+  Environment:
+    Type: String
+    Description: "Environment name (dev, staging, prod)"
+    Default: "prod"
+    AllowedValues:
+      - "dev"
+      - "staging"
+      - "prod"
+  TemplateS3Bucket:
+    Type: String
+    Description: "S3 bucket containing nested CloudFormation templates (leave empty to use relative paths for local deployment)"
+    Default: ""
+  TemplateS3KeyPrefix:
+    Type: String
+    Description: "S3 key prefix for nested templates (e.g., 'templates/' - include trailing slash)"
+    Default: ""
 
 Conditions:
   
@@ -75,6 +102,8 @@ Conditions:
   CreateCompetitiveIntelAgent:
     !Not [!Or [!Equals [!Ref TavilyApiKey, ""], !Equals [!Ref USPTOApiKey, ""]]]
   CreateReactApp: !Equals [!Ref DeployApplication, "true"]
+  CreateBiomarkerAppInfrastructure: !Equals [!Ref EnableBiomarkerAppInfrastructure, "true"]
+  HasTemplateS3Bucket: !Not [!Equals [!Ref TemplateS3Bucket, ""]]
 
 Resources:
   ##################################################################
@@ -106,6 +135,818 @@ Resources:
       Tags:
         - Key: Project
           Value: "hcls-agents-toolkit"
+
+  ##################################################################
+  # Additional Biomarker Application Infrastructure
+  ##################################################################
+
+  # KMS Key for encryption
+  BiomarkerKMSKey:
+    Type: AWS::KMS::Key
+    Condition: CreateBiomarkerAppInfrastructure
+    Properties:
+      Description: "KMS key for biomarker application encryption"
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: Allow use of the key for Lambda and Step Functions
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+                - states.amazonaws.com
+                - s3.amazonaws.com
+                - dynamodb.amazonaws.com
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: '*'
+      Tags:
+        - Key: Project
+          Value: "hcls-agents-toolkit"
+        - Key: Environment
+          Value: !Ref Environment
+
+  BiomarkerKMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Condition: CreateBiomarkerAppInfrastructure
+    Properties:
+      AliasName: !Sub "alias/${ProjectName}-${Environment}-key"
+      TargetKeyId: !Ref BiomarkerKMSKey
+
+  # Additional S3 Buckets for biomarker application
+  BiomarkerDataBucket:
+    Type: AWS::S3::Bucket
+    Condition: CreateBiomarkerAppInfrastructure
+    Properties:
+      BucketName: !Sub "${ProjectName}-data-${AWS::AccountId}-${AWS::Region}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref BiomarkerKMSKey
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionToIA
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+              - TransitionInDays: 90
+                StorageClass: GLACIER
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Project
+          Value: "hcls-agents-toolkit"
+        - Key: Environment
+          Value: !Ref Environment
+
+  ProcessedDataBucket:
+    Type: AWS::S3::Bucket
+    Condition: CreateBiomarkerAppInfrastructure
+    Properties:
+      BucketName: !Sub "${ProjectName}-processed-${AWS::AccountId}-${AWS::Region}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref BiomarkerKMSKey
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Project
+          Value: "hcls-agents-toolkit"
+        - Key: Environment
+          Value: !Ref Environment
+
+  # DynamoDB Tables
+  BiomarkerMetadataTable:
+    Type: AWS::DynamoDB::Table
+    Condition: CreateBiomarkerAppInfrastructure
+    Properties:
+      TableName: !Sub "${ProjectName}-metadata-${Environment}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: biomarker_id
+          AttributeType: S
+        - AttributeName: analysis_type
+          AttributeType: S
+      KeySchema:
+        - AttributeName: biomarker_id
+          KeyType: HASH
+        - AttributeName: analysis_type
+          KeyType: RANGE
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref BiomarkerKMSKey
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Project
+          Value: "hcls-agents-toolkit"
+        - Key: Environment
+          Value: !Ref Environment
+
+  AnalysisResultsTable:
+    Type: AWS::DynamoDB::Table
+    Condition: CreateBiomarkerAppInfrastructure
+    Properties:
+      TableName: !Sub "${ProjectName}-results-${Environment}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: analysis_id
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: analysis_id
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref BiomarkerKMSKey
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - Key: Project
+          Value: "hcls-agents-toolkit"
+        - Key: Environment
+          Value: !Ref Environment
+
+  # IAM Role for Lambda functions
+  BiomarkerLambdaRole:
+    Type: AWS::IAM::Role
+    Condition: CreateBiomarkerAppInfrastructure
+    Properties:
+      RoleName: !Sub "${ProjectName}-lambda-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: BiomarkerLambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt BiomarkerDataBucket.Arn
+                  - !GetAtt ProcessedDataBucket.Arn
+                  - !Sub "arn:aws:s3:::${BiomarkerDataBucket}/*"
+                  - !Sub "arn:aws:s3:::${ProcessedDataBucket}/*"
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !GetAtt BiomarkerMetadataTable.Arn
+                  - !GetAtt AnalysisResultsTable.Arn
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeAgent
+                  - bedrock:InvokeModel
+                  - bedrock:GetAgent
+                  - bedrock:ListAgents
+                Resource:
+                  - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent/*"
+                  - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent-alias/*"
+                  - !Sub "arn:aws:bedrock:*::foundation-model/*"
+              - Effect: Allow
+                Action:
+                  - omics:GetVariantStore
+                  - omics:ListVariantStores
+                  - omics:ListVariantImportJobs
+                  - omics:GetVariantImportJob
+                  - omics:GetAnnotationStore
+                  - omics:ListAnnotationStores
+                  - omics:GetReferenceStore
+                  - omics:ListReferenceStores
+                  - omics:GetWorkflow
+                  - omics:ListWorkflows
+                  - omics:GetRun
+                  - omics:ListRuns
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - kms:Encrypt
+                  - kms:Decrypt
+                  - kms:ReEncrypt*
+                  - kms:GenerateDataKey*
+                  - kms:DescribeKey
+                Resource: !GetAtt BiomarkerKMSKey.Arn
+              - Effect: Allow
+                Action:
+                  - states:StartExecution
+                  - states:DescribeExecution
+                  - states:StopExecution
+                Resource: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${ProjectName}-*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+      Tags:
+        - Key: Project
+          Value: "hcls-agents-toolkit"
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Lambda Functions
+  ScientificLiteratureSearchFunction:
+    Type: AWS::Lambda::Function
+    Condition: CreateBiomarkerAppInfrastructure
+    Properties:
+      FunctionName: !Sub "${ProjectName}-literature-search-${Environment}"
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt BiomarkerLambdaRole.Arn
+      Timeout: 300
+      MemorySize: 1024
+      Environment:
+        Variables:
+          METADATA_TABLE: !Ref BiomarkerMetadataTable
+          RESULTS_TABLE: !Ref AnalysisResultsTable
+          DATA_BUCKET: !Ref BiomarkerDataBucket
+          KMS_KEY_ID: !Ref BiomarkerKMSKey
+      VpcConfig:
+        SecurityGroupIds:
+          - !If [CreateNetworking, !GetAtt Network.Outputs.DefaultSecurityGroup, !Ref "AWS::NoValue"]
+        SubnetIds:
+          - !If [CreateNetworking, !GetAtt Network.Outputs.PrivateSubnet1, !Select [0, !Ref ExistingPrivateSubnets]]
+          - !If [CreateNetworking, !GetAtt Network.Outputs.PrivateSubnet2, !Select [1, !Ref ExistingPrivateSubnets]]
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          import requests
+          from datetime import datetime
+          import uuid
+          
+          def lambda_handler(event, context):
+              """
+              Scientific literature search function that integrates with PubMed API
+              and uses Bedrock agents for analysis
+              """
+              try:
+                  # Initialize AWS clients
+                  bedrock_runtime = boto3.client('bedrock-agent-runtime')
+                  dynamodb = boto3.resource('dynamodb')
+                  s3 = boto3.client('s3')
+                  
+                  # Get environment variables
+                  metadata_table = dynamodb.Table(os.environ['METADATA_TABLE'])
+                  results_table = dynamodb.Table(os.environ['RESULTS_TABLE'])
+                  data_bucket = os.environ['DATA_BUCKET']
+                  
+                  # Parse input
+                  query = event.get('query', '')
+                  biomarker = event.get('biomarker', '')
+                  max_results = event.get('max_results', 10)
+                  
+                  if not query and not biomarker:
+                      return {
+                          'statusCode': 400,
+                          'body': json.dumps({'error': 'Query or biomarker parameter required'})
+                      }
+                  
+                  # Search PubMed
+                  search_term = query if query else f"{biomarker} biomarker cancer"
+                  pubmed_results = search_pubmed(search_term, max_results)
+                  
+                  # Store results in DynamoDB
+                  analysis_id = str(uuid.uuid4())
+                  timestamp = datetime.utcnow().isoformat()
+                  
+                  # Store metadata
+                  metadata_table.put_item(
+                      Item={
+                          'biomarker_id': biomarker or 'literature_search',
+                          'analysis_type': 'literature_search',
+                          'analysis_id': analysis_id,
+                          'timestamp': timestamp,
+                          'query': search_term,
+                          'status': 'completed'
+                      }
+                  )
+                  
+                  # Store results
+                  results_table.put_item(
+                      Item={
+                          'analysis_id': analysis_id,
+                          'timestamp': timestamp,
+                          'results': pubmed_results,
+                          'result_count': len(pubmed_results),
+                          'ttl': int((datetime.utcnow().timestamp() + 86400 * 30))  # 30 days TTL
+                      }
+                  )
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({
+                          'analysis_id': analysis_id,
+                          'results': pubmed_results,
+                          'count': len(pubmed_results)
+                      })
+                  }
+                  
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps({'error': str(e)})
+                  }
+          
+          def search_pubmed(query, max_results=10):
+              """Search PubMed for scientific literature"""
+              try:
+                  # PubMed E-utilities API
+                  base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
+                  
+                  # Search for article IDs
+                  search_url = f"{base_url}esearch.fcgi"
+                  search_params = {
+                      'db': 'pubmed',
+                      'term': query,
+                      'retmax': max_results,
+                      'retmode': 'json'
+                  }
+                  
+                  search_response = requests.get(search_url, params=search_params)
+                  search_data = search_response.json()
+                  
+                  if 'esearchresult' not in search_data or 'idlist' not in search_data['esearchresult']:
+                      return []
+                  
+                  ids = search_data['esearchresult']['idlist']
+                  
+                  if not ids:
+                      return []
+                  
+                  # Fetch article details
+                  fetch_url = f"{base_url}efetch.fcgi"
+                  fetch_params = {
+                      'db': 'pubmed',
+                      'id': ','.join(ids),
+                      'retmode': 'xml'
+                  }
+                  
+                  fetch_response = requests.get(fetch_url, params=fetch_params)
+                  
+                  # Parse XML response (simplified)
+                  articles = []
+                  for pmid in ids:
+                      articles.append({
+                          'pmid': pmid,
+                          'title': f"Article {pmid}",
+                          'abstract': "Abstract not available in this demo",
+                          'url': f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+                      })
+                  
+                  return articles
+                  
+              except Exception as e:
+                  print(f"PubMed search error: {str(e)}")
+                  return []
+      Tags:
+        - Key: Project
+          Value: "hcls-agents-toolkit"
+        - Key: Environment
+          Value: !Ref Environment
+
+  DataProcessingFunction:
+    Type: AWS::Lambda::Function
+    Condition: CreateBiomarkerAppInfrastructure
+    Properties:
+      FunctionName: !Sub "${ProjectName}-data-processing-${Environment}"
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt BiomarkerLambdaRole.Arn
+      Timeout: 900
+      MemorySize: 2048
+      Environment:
+        Variables:
+          METADATA_TABLE: !Ref BiomarkerMetadataTable
+          RESULTS_TABLE: !Ref AnalysisResultsTable
+          DATA_BUCKET: !Ref BiomarkerDataBucket
+          PROCESSED_BUCKET: !Ref ProcessedDataBucket
+          KMS_KEY_ID: !Ref BiomarkerKMSKey
+      VpcConfig:
+        SecurityGroupIds:
+          - !If [CreateNetworking, !GetAtt Network.Outputs.DefaultSecurityGroup, !Ref "AWS::NoValue"]
+        SubnetIds:
+          - !If [CreateNetworking, !GetAtt Network.Outputs.PrivateSubnet1, !Select [0, !Ref ExistingPrivateSubnets]]
+          - !If [CreateNetworking, !GetAtt Network.Outputs.PrivateSubnet2, !Select [1, !Ref ExistingPrivateSubnets]]
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          import pandas as pd
+          from io import StringIO
+          import uuid
+          from datetime import datetime
+          
+          def lambda_handler(event, context):
+              """
+              Data processing function for biomarker analysis
+              """
+              try:
+                  # Initialize AWS clients
+                  s3 = boto3.client('s3')
+                  dynamodb = boto3.resource('dynamodb')
+                  stepfunctions = boto3.client('stepfunctions')
+                  
+                  # Get environment variables
+                  metadata_table = dynamodb.Table(os.environ['METADATA_TABLE'])
+                  results_table = dynamodb.Table(os.environ['RESULTS_TABLE'])
+                  data_bucket = os.environ['DATA_BUCKET']
+                  processed_bucket = os.environ['PROCESSED_BUCKET']
+                  
+                  # Parse input
+                  if 'Records' in event:
+                      # S3 trigger
+                      for record in event['Records']:
+                          bucket = record['s3']['bucket']['name']
+                          key = record['s3']['object']['key']
+                          process_s3_file(s3, bucket, key, processed_bucket, metadata_table, results_table)
+                  else:
+                      # Direct invocation
+                      data = event.get('data', {})
+                      analysis_type = event.get('analysis_type', 'general')
+                      result = process_biomarker_data(data, analysis_type)
+                      
+                      # Store results
+                      analysis_id = str(uuid.uuid4())
+                      timestamp = datetime.utcnow().isoformat()
+                      
+                      metadata_table.put_item(
+                          Item={
+                              'biomarker_id': data.get('biomarker_id', 'unknown'),
+                              'analysis_type': analysis_type,
+                              'analysis_id': analysis_id,
+                              'timestamp': timestamp,
+                              'status': 'completed'
+                          }
+                      )
+                      
+                      results_table.put_item(
+                          Item={
+                              'analysis_id': analysis_id,
+                              'timestamp': timestamp,
+                              'results': result,
+                              'ttl': int((datetime.utcnow().timestamp() + 86400 * 30))
+                          }
+                      )
+                      
+                      return {
+                          'statusCode': 200,
+                          'body': json.dumps({
+                              'analysis_id': analysis_id,
+                              'results': result
+                          })
+                      }
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({'message': 'Processing completed'})
+                  }
+                  
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps({'error': str(e)})
+                  }
+          
+          def process_s3_file(s3, bucket, key, processed_bucket, metadata_table, results_table):
+              """Process a file from S3"""
+              try:
+                  # Download file
+                  response = s3.get_object(Bucket=bucket, Key=key)
+                  content = response['Body'].read().decode('utf-8')
+                  
+                  # Process based on file type
+                  if key.endswith('.csv'):
+                      df = pd.read_csv(StringIO(content))
+                      result = analyze_csv_data(df)
+                  elif key.endswith('.json'):
+                      data = json.loads(content)
+                      result = analyze_json_data(data)
+                  else:
+                      result = {'message': 'File type not supported for automated processing'}
+                  
+                  # Save processed result
+                  processed_key = f"processed/{key}.json"
+                  s3.put_object(
+                      Bucket=processed_bucket,
+                      Key=processed_key,
+                      Body=json.dumps(result),
+                      ServerSideEncryption='aws:kms',
+                      SSEKMSKeyId=os.environ['KMS_KEY_ID']
+                  )
+                  
+                  # Store metadata
+                  analysis_id = str(uuid.uuid4())
+                  timestamp = datetime.utcnow().isoformat()
+                  
+                  metadata_table.put_item(
+                      Item={
+                          'biomarker_id': key,
+                          'analysis_type': 'file_processing',
+                          'analysis_id': analysis_id,
+                          'timestamp': timestamp,
+                          'source_file': f"s3://{bucket}/{key}",
+                          'processed_file': f"s3://{processed_bucket}/{processed_key}",
+                          'status': 'completed'
+                      }
+                  )
+                  
+              except Exception as e:
+                  print(f"Error processing file {key}: {str(e)}")
+          
+          def process_biomarker_data(data, analysis_type):
+              """Process biomarker data"""
+              # Placeholder for biomarker analysis logic
+              return {
+                  'analysis_type': analysis_type,
+                  'processed_at': datetime.utcnow().isoformat(),
+                  'summary': 'Data processed successfully',
+                  'data_points': len(data) if isinstance(data, list) else 1
+              }
+          
+          def analyze_csv_data(df):
+              """Analyze CSV data"""
+              return {
+                  'rows': len(df),
+                  'columns': len(df.columns),
+                  'column_names': df.columns.tolist(),
+                  'summary_stats': df.describe().to_dict() if not df.empty else {}
+              }
+          
+          def analyze_json_data(data):
+              """Analyze JSON data"""
+              return {
+                  'data_type': type(data).__name__,
+                  'keys': list(data.keys()) if isinstance(data, dict) else [],
+                  'length': len(data) if hasattr(data, '__len__') else 0
+              }
+      Tags:
+        - Key: Project
+          Value: "hcls-agents-toolkit"
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Step Functions State Machine
+  BiomarkerAnalysisStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Condition: CreateBiomarkerAppInfrastructure
+    Properties:
+      StateMachineName: !Sub "${ProjectName}-analysis-workflow-${Environment}"
+      RoleArn: !GetAtt StepFunctionsRole.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "Biomarker analysis workflow",
+          "StartAt": "ProcessData",
+          "States": {
+            "ProcessData": {
+              "Type": "Task",
+              "Resource": "${DataProcessingFunction.Arn}",
+              "Next": "SearchLiterature",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ]
+            },
+            "SearchLiterature": {
+              "Type": "Task",
+              "Resource": "${ScientificLiteratureSearchFunction.Arn}",
+              "Next": "AnalysisComplete",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ]
+            },
+            "AnalysisComplete": {
+              "Type": "Succeed",
+              "Comment": "Analysis workflow completed successfully"
+            }
+          }
+        }
+      Tags:
+        - Key: Project
+          Value: "hcls-agents-toolkit"
+        - Key: Environment
+          Value: !Ref Environment
+
+  # IAM Role for Step Functions
+  StepFunctionsRole:
+    Type: AWS::IAM::Role
+    Condition: CreateBiomarkerAppInfrastructure
+    Properties:
+      RoleName: !Sub "${ProjectName}-stepfunctions-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StepFunctionsExecutionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !GetAtt ScientificLiteratureSearchFunction.Arn
+                  - !GetAtt DataProcessingFunction.Arn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+      Tags:
+        - Key: Project
+          Value: "hcls-agents-toolkit"
+        - Key: Environment
+          Value: !Ref Environment
+
+  # API Gateway
+  BiomarkerAPI:
+    Type: AWS::ApiGateway::RestApi
+    Condition: CreateBiomarkerAppInfrastructure
+    Properties:
+      Name: !Sub "${ProjectName}-api-${Environment}"
+      Description: "Biomarker application API"
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      Tags:
+        - Key: Project
+          Value: "hcls-agents-toolkit"
+        - Key: Environment
+          Value: !Ref Environment
+
+  ##################################################################
+  # Enhanced Biomarker Application Infrastructure (Nested Stacks)
+  ##################################################################
+
+  # Core Infrastructure (S3, DynamoDB, KMS)
+  BiomarkerCoreInfrastructure:
+    Type: AWS::CloudFormation::Stack
+    Condition: CreateBiomarkerAppInfrastructure
+    Properties:
+      TemplateURL: !If 
+        - HasTemplateS3Bucket
+        - !Sub "https://${TemplateS3Bucket}.s3.${AWS::Region}.amazonaws.com/${TemplateS3KeyPrefix}biomarker-app-infrastructure.yaml"
+        - "biomarker-app-infrastructure.yaml"
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        VpcId: !If [ CreateNetworking, !GetAtt "Network.Outputs.VPC" , !Ref ExistingVpcId ]
+        PrivateSubnetIds: !If [ CreateNetworking, !Sub "${Network.Outputs.PrivateSubnet1},${Network.Outputs.PrivateSubnet2}" , !Join [",", !Ref ExistingPrivateSubnets] ]
+        DefaultSecurityGroupId: !If [ CreateNetworking, !GetAtt "Network.Outputs.DefaultSecurityGroup" , "" ]
+        AgentRoleArn: !GetAtt AgentRole.Arn
+      TimeoutInMinutes: 20
+      Tags:
+        - Key: Project
+          Value: "hcls-agents-toolkit"
+        - Key: Component
+          Value: "core-infrastructure"
+
+  # Lambda Functions
+  BiomarkerLambdaFunctions:
+    Type: AWS::CloudFormation::Stack
+    Condition: CreateBiomarkerAppInfrastructure
+    DependsOn: BiomarkerCoreInfrastructure
+    Properties:
+      TemplateURL: !If 
+        - HasTemplateS3Bucket
+        - !Sub "https://${TemplateS3Bucket}.s3.${AWS::Region}.amazonaws.com/${TemplateS3KeyPrefix}biomarker-lambda-functions.yaml"
+        - "biomarker-lambda-functions.yaml"
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        VpcId: !If [ CreateNetworking, !GetAtt "Network.Outputs.VPC" , !Ref ExistingVpcId ]
+        PrivateSubnetIds: !If [ CreateNetworking, !Sub "${Network.Outputs.PrivateSubnet1},${Network.Outputs.PrivateSubnet2}" , !Join [",", !Ref ExistingPrivateSubnets] ]
+        DefaultSecurityGroupId: !If [ CreateNetworking, !GetAtt "Network.Outputs.DefaultSecurityGroup" , "" ]
+        KMSKeyId: !GetAtt BiomarkerCoreInfrastructure.Outputs.BiomarkerKMSKeyId
+        MetadataTableName: !GetAtt BiomarkerCoreInfrastructure.Outputs.BiomarkerMetadataTableName
+        ResultsTableName: !GetAtt BiomarkerCoreInfrastructure.Outputs.AnalysisResultsTableName
+        DataBucketName: !GetAtt BiomarkerCoreInfrastructure.Outputs.BiomarkerDataBucketName
+        ProcessedBucketName: !GetAtt BiomarkerCoreInfrastructure.Outputs.ProcessedDataBucketName
+      TimeoutInMinutes: 15
+      Tags:
+        - Key: Project
+          Value: "hcls-agents-toolkit"
+        - Key: Component
+          Value: "lambda-functions"
+
+  # HealthOmics Integration
+  BiomarkerHealthOmicsIntegration:
+    Type: AWS::CloudFormation::Stack
+    Condition: CreateBiomarkerAppInfrastructure
+    DependsOn: BiomarkerCoreInfrastructure
+    Properties:
+      TemplateURL: !If 
+        - HasTemplateS3Bucket
+        - !Sub "https://${TemplateS3Bucket}.s3.${AWS::Region}.amazonaws.com/${TemplateS3KeyPrefix}healthomics-integration.yaml"
+        - "healthomics-integration.yaml"
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        VpcId: !If [ CreateNetworking, !GetAtt "Network.Outputs.VPC" , !Ref ExistingVpcId ]
+        PrivateSubnetIds: !If [ CreateNetworking, !Sub "${Network.Outputs.PrivateSubnet1},${Network.Outputs.PrivateSubnet2}" , !Join [",", !Ref ExistingPrivateSubnets] ]
+        DefaultSecurityGroupId: !If [ CreateNetworking, !GetAtt "Network.Outputs.DefaultSecurityGroup" , "" ]
+        KMSKeyId: !GetAtt BiomarkerCoreInfrastructure.Outputs.BiomarkerKMSKeyId
+        MetadataTableName: !GetAtt BiomarkerCoreInfrastructure.Outputs.BiomarkerMetadataTableName
+        ResultsTableName: !GetAtt BiomarkerCoreInfrastructure.Outputs.AnalysisResultsTableName
+        DataBucketName: !GetAtt BiomarkerCoreInfrastructure.Outputs.BiomarkerDataBucketName
+        ProcessedBucketName: !GetAtt BiomarkerCoreInfrastructure.Outputs.ProcessedDataBucketName
+      TimeoutInMinutes: 15
+      Tags:
+        - Key: Project
+          Value: "hcls-agents-toolkit"
+        - Key: Component
+          Value: "healthomics-integration"
+
+  # Workflows and API Gateway
+  BiomarkerWorkflows:
+    Type: AWS::CloudFormation::Stack
+    Condition: CreateBiomarkerAppInfrastructure
+    DependsOn: 
+      - BiomarkerLambdaFunctions
+      - BiomarkerHealthOmicsIntegration
+    Properties:
+      TemplateURL: !If 
+        - HasTemplateS3Bucket
+        - !Sub "https://${TemplateS3Bucket}.s3.${AWS::Region}.amazonaws.com/${TemplateS3KeyPrefix}biomarker-workflows.yaml"
+        - "biomarker-workflows.yaml"
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        DataProcessingFunctionArn: !GetAtt BiomarkerLambdaFunctions.Outputs.DataProcessingFunctionArn
+        LiteratureSearchFunctionArn: !GetAtt BiomarkerLambdaFunctions.Outputs.ScientificLiteratureSearchFunctionArn
+        HealthOmicsFunctionArn: !GetAtt BiomarkerHealthOmicsIntegration.Outputs.HealthOmicsIntegrationFunctionArn
+      TimeoutInMinutes: 10
+      Tags:
+        - Key: Project
+          Value: "hcls-agents-toolkit"
+        - Key: Component
+          Value: "workflows-api"
 
   ##################################################################
   # Copy code repo to S3
@@ -365,6 +1206,7 @@ Resources:
           Value: "hcls-agents-toolkit"
 
   LiteratureCuratorAgent:
+    #DeletionPolicy: Retain
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: agents_catalog/22-literature-curator-agent/literature-curator-agent-cfn.yaml
@@ -376,6 +1218,7 @@ Resources:
           Value: "hcls-agents-toolkit"
 
   AthenaSQLGeneratorAgent:
+    #DeletionPolicy: Retain
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: agents_catalog/23-athena-sql-generator-agent/athena-sql-generator-agent-cfn.yaml
@@ -400,3 +1243,166 @@ Outputs:
   AgentRole:
     Value: !GetAtt AgentRole.Arn
     Description: Amazon Bedrock Agents Service Role ARN
+  
+  # Biomarker Application Infrastructure Outputs
+  BiomarkerDataBucketName:
+    Condition: CreateBiomarkerAppInfrastructure
+    Value: !GetAtt BiomarkerCoreInfrastructure.Outputs.BiomarkerDataBucketName
+    Description: S3 bucket for biomarker data storage
+    Export:
+      Name: !Sub "${AWS::StackName}-BiomarkerDataBucket"
+  
+  ProcessedDataBucketName:
+    Condition: CreateBiomarkerAppInfrastructure
+    Value: !GetAtt BiomarkerCoreInfrastructure.Outputs.ProcessedDataBucketName
+    Description: S3 bucket for processed data storage
+    Export:
+      Name: !Sub "${AWS::StackName}-ProcessedDataBucket"
+  
+  BiomarkerMetadataTableName:
+    Condition: CreateBiomarkerAppInfrastructure
+    Value: !GetAtt BiomarkerCoreInfrastructure.Outputs.BiomarkerMetadataTableName
+    Description: DynamoDB table for biomarker metadata
+    Export:
+      Name: !Sub "${AWS::StackName}-MetadataTable"
+  
+  AnalysisResultsTableName:
+    Condition: CreateBiomarkerAppInfrastructure
+    Value: !GetAtt BiomarkerCoreInfrastructure.Outputs.AnalysisResultsTableName
+    Description: DynamoDB table for analysis results
+    Export:
+      Name: !Sub "${AWS::StackName}-ResultsTable"
+  
+  ScientificLiteratureSearchFunctionArn:
+    Condition: CreateBiomarkerAppInfrastructure
+    Value: !GetAtt BiomarkerLambdaFunctions.Outputs.ScientificLiteratureSearchFunctionArn
+    Description: ARN of the scientific literature search Lambda function
+    Export:
+      Name: !Sub "${AWS::StackName}-LiteratureSearchFunction"
+  
+  DataProcessingFunctionArn:
+    Condition: CreateBiomarkerAppInfrastructure
+    Value: !GetAtt BiomarkerLambdaFunctions.Outputs.DataProcessingFunctionArn
+    Description: ARN of the data processing Lambda function
+    Export:
+      Name: !Sub "${AWS::StackName}-DataProcessingFunction"
+  
+  BiomarkerAnalysisStateMachineArn:
+    Condition: CreateBiomarkerAppInfrastructure
+    Value: !GetAtt BiomarkerWorkflows.Outputs.BiomarkerAnalysisStateMachineArn
+    Description: ARN of the biomarker analysis Step Functions state machine
+    Export:
+      Name: !Sub "${AWS::StackName}-AnalysisStateMachine"
+  
+  BiomarkerAPIId:
+    Condition: CreateBiomarkerAppInfrastructure
+    Value: !GetAtt BiomarkerWorkflows.Outputs.BiomarkerAPIId
+    Description: API Gateway ID for biomarker application
+    Export:
+      Name: !Sub "${AWS::StackName}-APIGateway"
+  
+  BiomarkerAPIUrl:
+    Condition: CreateBiomarkerAppInfrastructure
+    Value: !GetAtt BiomarkerWorkflows.Outputs.BiomarkerAPIUrl
+    Description: API Gateway URL for biomarker application
+    Export:
+      Name: !Sub "${AWS::StackName}-APIUrl"
+  
+  KMSKeyId:
+    Condition: CreateBiomarkerAppInfrastructure
+    Value: !GetAtt BiomarkerCoreInfrastructure.Outputs.BiomarkerKMSKeyId
+    Description: KMS key ID for encryption
+    Export:
+      Name: !Sub "${AWS::StackName}-KMSKey"
+  
+  # HealthOmics Integration Outputs
+  HealthOmicsIntegrationFunctionArn:
+    Condition: CreateBiomarkerAppInfrastructure
+    Value: !GetAtt BiomarkerHealthOmicsIntegration.Outputs.HealthOmicsIntegrationFunctionArn
+    Description: ARN of the HealthOmics integration Lambda function
+    Export:
+      Name: !Sub "${AWS::StackName}-HealthOmicsFunction"
+  
+  HealthOmicsReferenceStoreId:
+    Condition: CreateBiomarkerAppInfrastructure
+    Value: "2289344333"
+    Description: Existing HealthOmics Reference Store ID
+    Export:
+      Name: !Sub "${AWS::StackName}-ReferenceStoreId"
+  
+  HealthOmicsVariantStores:
+    Condition: CreateBiomarkerAppInfrastructure
+    Value: !Sub |
+      Variant Store 2: 2980d1e0d667 (my_variant_store_2)
+      Variant Store 3: 8cd35661f78f (my_variant_store_3) 
+      Variant Store 4: 368016e44044 (my_variant_store_4)
+    Description: Available HealthOmics Variant Store IDs
+    Export:
+      Name: !Sub "${AWS::StackName}-VariantStores"
+  
+  HealthOmicsAnnotationStoreId:
+    Condition: CreateBiomarkerAppInfrastructure
+    Value: "1aead2db2d7f"
+    Description: Existing HealthOmics Annotation Store ID (my_annotation_store)
+    Export:
+      Name: !Sub "${AWS::StackName}-AnnotationStoreId"
+  
+  HealthOmicsWorkflows:
+    Condition: CreateBiomarkerAppInfrastructure
+    Value: !Sub |
+      GATK Variant Discovery: 2403822
+      Sample Workflow: 8567133
+    Description: Available HealthOmics Workflow IDs
+    Export:
+      Name: !Sub "${AWS::StackName}-WorkflowIds"
+  
+  DeploymentInstructions:
+    Condition: CreateBiomarkerAppInfrastructure
+    Value: !Sub |
+      HCLS Agents Toolkit with Enhanced Biomarker Infrastructure Deployed Successfully!
+      
+      Core Infrastructure (Nested Stacks):
+      - Core Infrastructure: ${BiomarkerCoreInfrastructure}
+      - Lambda Functions: ${BiomarkerLambdaFunctions}
+      - HealthOmics Integration: ${BiomarkerHealthOmicsIntegration}
+      - Workflows & API: ${BiomarkerWorkflows}
+      
+      Key Resources Created:
+      - S3 Buckets: Data and processed storage with KMS encryption
+      - DynamoDB Tables: Metadata and results with point-in-time recovery
+      - Lambda Functions: Literature search, data processing, HealthOmics integration
+      - Step Functions: Biomarker analysis and literature curation workflows
+      - API Gateway: RESTful endpoints for programmatic access
+      
+      HealthOmics Integration:
+      - Reference Store: 2289344333 (Reference store)
+      - Variant Stores: 
+        * 2980d1e0d667 (my_variant_store_2) - 1MB
+        * 8cd35661f78f (my_variant_store_3) - 67MB  
+        * 368016e44044 (my_variant_store_4) - 67MB
+      - Annotation Store: 1aead2db2d7f (my_annotation_store) - 59MB VCF
+      - Workflows:
+        * 2403822 (GATKVariantDiscovery)
+        * 8567133 (Sample)
+      
+      API Endpoints:
+      - Health Check: GET ${BiomarkerWorkflows.Outputs.BiomarkerAPIUrl}/health
+      - Start Analysis: POST ${BiomarkerWorkflows.Outputs.BiomarkerAPIUrl}/analyze
+      - Literature Search: POST ${BiomarkerWorkflows.Outputs.BiomarkerAPIUrl}/literature
+      - Genomics Query: POST ${BiomarkerWorkflows.Outputs.BiomarkerAPIUrl}/genomics
+      
+      Integration with Existing Agents:
+      - Biomarker Database Analyst: Ready for HealthOmics variant queries
+      - Clinical Evidence Researcher: Enhanced with genomic literature search
+      - Medical Imaging Expert: Ready for genomic imaging analysis
+      
+      Next Steps:
+      1. Upload genomic data to S3 bucket
+      2. Test HealthOmics integration via Lambda function
+      3. Execute genomic analysis workflows via API or Step Functions
+      4. Configure monitoring and alerting
+      5. Set up user authentication for API access
+      
+      For detailed instructions, see the DEPLOYMENT.md file.
+      Run ./verify-deployment.sh to verify all components are working correctly.
+    Description: Deployment completion summary with modular architecture details

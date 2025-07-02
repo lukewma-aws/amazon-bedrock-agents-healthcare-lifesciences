@@ -1,0 +1,428 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Biomarker Application Workflows and API Gateway'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Description: "Project name for resource tagging and naming"
+    Default: "biomarker-app"
+  
+  Environment:
+    Type: String
+    Description: "Environment name (dev, staging, prod)"
+    Default: "prod"
+    
+  DataProcessingFunctionArn:
+    Type: String
+    Description: "ARN of the data processing Lambda function"
+    
+  LiteratureSearchFunctionArn:
+    Type: String
+    Description: "ARN of the literature search Lambda function"
+    
+  HealthOmicsFunctionArn:
+    Type: String
+    Description: "ARN of the HealthOmics integration Lambda function"
+
+Resources:
+  ##################################################################
+  # IAM Role for Step Functions
+  ##################################################################
+  StepFunctionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-stepfunctions-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StepFunctionsExecutionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !Ref LiteratureSearchFunctionArn
+                  - !Ref DataProcessingFunctionArn
+                  - !Ref HealthOmicsFunctionArn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+      Tags:
+        - Key: Project
+          Value: "hcls-agents-toolkit"
+        - Key: Environment
+          Value: !Ref Environment
+
+  ##################################################################
+  # Step Functions State Machine
+  ##################################################################
+  BiomarkerAnalysisStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub "${ProjectName}-analysis-workflow-${Environment}"
+      RoleArn: !GetAtt StepFunctionsRole.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "Comprehensive biomarker analysis workflow with HealthOmics integration",
+          "StartAt": "ProcessData",
+          "States": {
+            "ProcessData": {
+              "Type": "Task",
+              "Resource": "${DataProcessingFunctionArn}",
+              "Next": "ParallelAnalysis",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "AnalysisFailed"
+                }
+              ]
+            },
+            "ParallelAnalysis": {
+              "Type": "Parallel",
+              "Branches": [
+                {
+                  "StartAt": "SearchLiterature",
+                  "States": {
+                    "SearchLiterature": {
+                      "Type": "Task",
+                      "Resource": "${LiteratureSearchFunctionArn}",
+                      "End": true,
+                      "Retry": [
+                        {
+                          "ErrorEquals": ["States.TaskFailed"],
+                          "IntervalSeconds": 2,
+                          "MaxAttempts": 3,
+                          "BackoffRate": 2.0
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "StartAt": "HealthOmicsAnalysis",
+                  "States": {
+                    "HealthOmicsAnalysis": {
+                      "Type": "Task",
+                      "Resource": "${HealthOmicsFunctionArn}",
+                      "End": true,
+                      "Retry": [
+                        {
+                          "ErrorEquals": ["States.TaskFailed"],
+                          "IntervalSeconds": 2,
+                          "MaxAttempts": 3,
+                          "BackoffRate": 2.0
+                        }
+                      ]
+                    }
+                  }
+                }
+              ],
+              "Next": "AnalysisComplete",
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "AnalysisFailed"
+                }
+              ]
+            },
+            "AnalysisComplete": {
+              "Type": "Succeed",
+              "Comment": "Comprehensive biomarker analysis completed successfully"
+            },
+            "AnalysisFailed": {
+              "Type": "Fail",
+              "Comment": "Biomarker analysis workflow failed"
+            }
+          }
+        }
+      Tags:
+        - Key: Project
+          Value: "hcls-agents-toolkit"
+        - Key: Environment
+          Value: !Ref Environment
+
+  ##################################################################
+  # Literature Curation State Machine
+  ##################################################################
+  LiteratureCurationStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub "${ProjectName}-literature-curation-${Environment}"
+      RoleArn: !GetAtt StepFunctionsRole.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "Automated literature curation workflow",
+          "StartAt": "SearchLiterature",
+          "States": {
+            "SearchLiterature": {
+              "Type": "Task",
+              "Resource": "${LiteratureSearchFunctionArn}",
+              "Next": "ProcessResults",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ]
+            },
+            "ProcessResults": {
+              "Type": "Task",
+              "Resource": "${DataProcessingFunctionArn}",
+              "Next": "CurationComplete",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ]
+            },
+            "CurationComplete": {
+              "Type": "Succeed",
+              "Comment": "Literature curation completed successfully"
+            }
+          }
+        }
+      Tags:
+        - Key: Project
+          Value: "hcls-agents-toolkit"
+        - Key: Environment
+          Value: !Ref Environment
+
+  ##################################################################
+  # API Gateway
+  ##################################################################
+  BiomarkerAPI:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub "${ProjectName}-api-${Environment}"
+      Description: "Biomarker application API with HealthOmics integration"
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      Tags:
+        - Key: Project
+          Value: "hcls-agents-toolkit"
+        - Key: Environment
+          Value: !Ref Environment
+
+  # API Gateway Deployment
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - HealthMethod
+      - AnalyzeMethod
+      - LiteratureMethod
+      - GenomicsMethod
+    Properties:
+      RestApiId: !Ref BiomarkerAPI
+      StageName: !Ref Environment
+
+  # Health check resource
+  HealthResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref BiomarkerAPI
+      ParentId: !GetAtt BiomarkerAPI.RootResourceId
+      PathPart: health
+
+  HealthMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref BiomarkerAPI
+      ResourceId: !Ref HealthResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseTemplates:
+              application/json: '{"status": "healthy", "service": "biomarker-api"}'
+      MethodResponses:
+        - StatusCode: 200
+
+  # Analysis resource
+  AnalyzeResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref BiomarkerAPI
+      ParentId: !GetAtt BiomarkerAPI.RootResourceId
+      PathPart: analyze
+
+  AnalyzeMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref BiomarkerAPI
+      ResourceId: !Ref AnalyzeResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:states:action/StartExecution"
+        Credentials: !GetAtt ApiGatewayStepFunctionsRole.Arn
+        RequestTemplates:
+          application/json: !Sub |
+            {
+              "stateMachineArn": "${BiomarkerAnalysisStateMachine}",
+              "input": "$util.escapeJavaScript($input.json('$'))"
+            }
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseTemplates:
+              application/json: '{"message": "Analysis started", "executionArn": "$input.json($.executionArn)"}'
+      MethodResponses:
+        - StatusCode: 200
+
+  # Literature search resource
+  LiteratureResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref BiomarkerAPI
+      ParentId: !GetAtt BiomarkerAPI.RootResourceId
+      PathPart: literature
+
+  LiteratureMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref BiomarkerAPI
+      ResourceId: !Ref LiteratureResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LiteratureSearchFunctionArn}/invocations"
+        Credentials: !GetAtt ApiGatewayLambdaRole.Arn
+      MethodResponses:
+        - StatusCode: 200
+
+  # Genomics resource
+  GenomicsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref BiomarkerAPI
+      ParentId: !GetAtt BiomarkerAPI.RootResourceId
+      PathPart: genomics
+
+  GenomicsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref BiomarkerAPI
+      ResourceId: !Ref GenomicsResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${HealthOmicsFunctionArn}/invocations"
+        Credentials: !GetAtt ApiGatewayLambdaRole.Arn
+      MethodResponses:
+        - StatusCode: 200
+
+  ##################################################################
+  # IAM Roles for API Gateway
+  ##################################################################
+  ApiGatewayStepFunctionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StepFunctionsExecutionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - states:StartExecution
+                Resource:
+                  - !Ref BiomarkerAnalysisStateMachine
+                  - !Ref LiteratureCurationStateMachine
+
+  ApiGatewayLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaInvokePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !Ref LiteratureSearchFunctionArn
+                  - !Ref DataProcessingFunctionArn
+                  - !Ref HealthOmicsFunctionArn
+
+Outputs:
+  BiomarkerAnalysisStateMachineArn:
+    Description: "ARN of the biomarker analysis Step Functions state machine"
+    Value: !Ref BiomarkerAnalysisStateMachine
+    Export:
+      Name: !Sub "${AWS::StackName}-AnalysisStateMachine"
+      
+  LiteratureCurationStateMachineArn:
+    Description: "ARN of the literature curation Step Functions state machine"
+    Value: !Ref LiteratureCurationStateMachine
+    Export:
+      Name: !Sub "${AWS::StackName}-LiteratureStateMachine"
+      
+  BiomarkerAPIId:
+    Description: "API Gateway ID for biomarker application"
+    Value: !Ref BiomarkerAPI
+    Export:
+      Name: !Sub "${AWS::StackName}-APIGateway"
+      
+  BiomarkerAPIUrl:
+    Description: "API Gateway URL for biomarker application"
+    Value: !Sub "https://${BiomarkerAPI}.execute-api.${AWS::Region}.amazonaws.com/${Environment}"
+    Export:
+      Name: !Sub "${AWS::StackName}-APIUrl"
+      
+  ApiEndpoints:
+    Description: "Available API endpoints"
+    Value: !Sub |
+      Health Check: GET https://${BiomarkerAPI}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/health
+      Start Analysis: POST https://${BiomarkerAPI}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/analyze
+      Literature Search: POST https://${BiomarkerAPI}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/literature
+      Genomics Query: POST https://${BiomarkerAPI}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/genomics
+    Export:
+      Name: !Sub "${AWS::StackName}-Endpoints"
