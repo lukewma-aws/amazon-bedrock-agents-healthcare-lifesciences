@@ -10,6 +10,8 @@ AGENT_NUMBER=""
 STACK_NAME=""
 REGION="${REGION:-us-east-1}"
 S3_BUCKET="${DEPLOYMENT_BUCKET:-genovia-deployment}"
+# Array to store parameter overrides for CloudFormation
+declare -a PARAMETER_OVERRIDES=()
 
 # Colors for output
 RED='\033[0;31m'
@@ -52,6 +54,11 @@ while [[ $# -gt 0 ]]; do
       ;;
     --bucket)
       S3_BUCKET="$2"
+      shift 2
+      ;;
+    --param)
+      # Format: --param ParameterName=ParameterValue
+      PARAMETER_OVERRIDES+=("$2")
       shift 2
       ;;
     *)
@@ -134,7 +141,8 @@ print_status "Cleaned up temporary directory"
 codebuild_stack_name="codebuild-stack"
 if aws cloudformation describe-stacks --stack-name "$codebuild_stack_name" --region "$REGION" 2>/dev/null; then
   print_status "CodeBuild stack exists, updating..."
-  aws cloudformation update-stack \
+  # Use || true to ignore errors, including "No updates to be performed"
+  update_output=$(aws cloudformation update-stack \
     --stack-name "$codebuild_stack_name" \
     --template-body file://build/codebuild.yaml \
     --parameters \
@@ -142,7 +150,17 @@ if aws cloudformation describe-stacks --stack-name "$codebuild_stack_name" --reg
       ParameterKey=AgentNumber,ParameterValue="$AGENT_NUMBER" \
       ParameterKey=UseLocalFiles,ParameterValue="true" \
     --capabilities CAPABILITY_IAM \
-    --region "$REGION" || true
+    --region "$REGION" 2>&1) || true
+  
+  # Check if the error was "No updates to be performed"
+  if echo "$update_output" | grep -q "No updates are to be performed"; then
+    print_status "No updates needed for CodeBuild stack"
+  elif echo "$update_output" | grep -q "error"; then
+    print_error "Error updating CodeBuild stack: $update_output"
+    # Continue execution despite the error
+  else
+    print_status "CodeBuild stack update initiated"
+  fi
 else
   print_status "Creating CodeBuild stack..."
   aws cloudformation create-stack \
@@ -179,12 +197,159 @@ print_status "Downloaded packaged template from S3"
 
 # Deploy the agent
 print_status "Deploying agent #$AGENT_NUMBER with stack name $STACK_NAME..."
-aws cloudformation deploy \
-  --template-file "$packaged_template" \
-  --stack-name "$STACK_NAME" \
-  --capabilities CAPABILITY_IAM \
-  --region "$REGION" \
-  --no-fail-on-empty-changeset
+
+# Check if we have any parameter overrides
+if [ ${#PARAMETER_OVERRIDES[@]} -gt 0 ]; then
+  # Convert array to space-separated string of ParameterKey=Value pairs
+  PARAMS=""
+  for param in "${PARAMETER_OVERRIDES[@]}"; do
+    PARAMS="$PARAMS $param"
+  done
+  
+  print_status "Deploying with custom parameters: $PARAMS"
+  
+  # Check if AgentIAMRoleArn is provided
+  if ! echo "$PARAMS" | grep -q "AgentIAMRoleArn"; then
+    # Check if the SSM parameter exists
+    if ! aws ssm get-parameter --name "/bedrock/agent/role/arn" --region "$REGION" &>/dev/null; then
+      print_warning "SSM parameter /bedrock/agent/role/arn not found. Creating an IAM role for Bedrock agent..."
+      
+      # Create a role for Bedrock agent
+      ROLE_NAME="BedrockAgentRole-$RANDOM"
+      ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      
+      aws iam create-role \
+        --role-name "$ROLE_NAME" \
+        --assume-role-policy-document '{
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "bedrock.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        }' --region "$REGION" &>/dev/null
+      
+      aws iam attach-role-policy \
+        --role-name "$ROLE_NAME" \
+        --policy-arn arn:aws:iam::aws:policy/AmazonBedrockFullAccess --region "$REGION" &>/dev/null
+      
+      ROLE_ARN="arn:aws:iam::$ACCOUNT_ID:role/$ROLE_NAME"
+      print_status "Created IAM role: $ROLE_ARN"
+      
+      # Add the role ARN to parameters
+      PARAMS="$PARAMS AgentIAMRoleArn=$ROLE_ARN"
+    fi
+  fi
+  
+  # Deploy with custom parameters
+  deploy_output=$(aws cloudformation deploy \
+    --template-file "$packaged_template" \
+    --stack-name "$STACK_NAME" \
+    --capabilities CAPABILITY_IAM \
+    --region "$REGION" \
+    --parameter-overrides $PARAMS \
+    --no-fail-on-empty-changeset 2>&1) || true
+  
+  # Check for SSM parameter error
+  if echo "$deploy_output" | grep -q "Parameters: \[ssm:/bedrock/agent/role/arn"; then
+    print_error "SSM parameter error detected. Retrying with a new IAM role..."
+    
+    # Create a role for Bedrock agent
+    ROLE_NAME="BedrockAgentRole-$RANDOM"
+    ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+    
+    aws iam create-role \
+      --role-name "$ROLE_NAME" \
+      --assume-role-policy-document '{
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Principal": {
+              "Service": "bedrock.amazonaws.com"
+            },
+            "Action": "sts:AssumeRole"
+          }
+        ]
+      }' --region "$REGION" &>/dev/null
+    
+    aws iam attach-role-policy \
+      --role-name "$ROLE_NAME" \
+      --policy-arn arn:aws:iam::aws:policy/AmazonBedrockFullAccess --region "$REGION" &>/dev/null
+    
+    ROLE_ARN="arn:aws:iam::$ACCOUNT_ID:role/$ROLE_NAME"
+    print_status "Created IAM role: $ROLE_ARN"
+    
+    # Retry deployment with the new role
+    aws cloudformation deploy \
+      --template-file "$packaged_template" \
+      --stack-name "$STACK_NAME" \
+      --capabilities CAPABILITY_IAM \
+      --region "$REGION" \
+      --parameter-overrides $PARAMS AgentIAMRoleArn=$ROLE_ARN \
+      --no-fail-on-empty-changeset
+  elif echo "$deploy_output" | grep -q "error"; then
+    print_error "Deployment error: $deploy_output"
+  else
+    print_status "Deployment completed"
+  fi
+else
+  # Default deployment without custom parameters
+  deploy_output=$(aws cloudformation deploy \
+    --template-file "$packaged_template" \
+    --stack-name "$STACK_NAME" \
+    --capabilities CAPABILITY_IAM \
+    --region "$REGION" \
+    --no-fail-on-empty-changeset 2>&1) || true
+  
+  # Check for SSM parameter error
+  if echo "$deploy_output" | grep -q "Parameters: \[ssm:/bedrock/agent/role/arn"; then
+    print_error "SSM parameter error detected. Retrying with a new IAM role..."
+    
+    # Create a role for Bedrock agent
+    ROLE_NAME="BedrockAgentRole-$RANDOM"
+    ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+    
+    aws iam create-role \
+      --role-name "$ROLE_NAME" \
+      --assume-role-policy-document '{
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Principal": {
+              "Service": "bedrock.amazonaws.com"
+            },
+            "Action": "sts:AssumeRole"
+          }
+        ]
+      }' --region "$REGION" &>/dev/null
+    
+    aws iam attach-role-policy \
+      --role-name "$ROLE_NAME" \
+      --policy-arn arn:aws:iam::aws:policy/AmazonBedrockFullAccess --region "$REGION" &>/dev/null
+    
+    ROLE_ARN="arn:aws:iam::$ACCOUNT_ID:role/$ROLE_NAME"
+    print_status "Created IAM role: $ROLE_ARN"
+    
+    # Retry deployment with the new role
+    aws cloudformation deploy \
+      --template-file "$packaged_template" \
+      --stack-name "$STACK_NAME" \
+      --capabilities CAPABILITY_IAM \
+      --region "$REGION" \
+      --parameter-overrides AgentIAMRoleArn=$ROLE_ARN \
+      --no-fail-on-empty-changeset
+  elif echo "$deploy_output" | grep -q "error"; then
+    print_error "Deployment error: $deploy_output"
+  else
+    print_status "Deployment completed"
+  fi
+fi
 
 print_success "Agent #$AGENT_NUMBER deployed successfully with local changes!"
 
