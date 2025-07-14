@@ -1,49 +1,98 @@
-AWSTemplateFormatVersion: '2010-09-09'
-Description: 'Literature Curator Agent for HCLS Agents Toolkit'
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Creates the Literature Curator Agent for retrieving and summarizing insights from scientific literature using PubMed APIs and Amazon Bedrock Knowledge Bases.
 
 Parameters:
-  AgentIAMRoleArn:
+  AgentAliasName:
     Type: String
-    Description: "ARN of the IAM role for the Bedrock agent and Lambda function"
-  
-  S3CodeBucket:
-    Type: String
-    Description: "S3 bucket containing the agent code"
-  
-  S3CodeKey:
-    Type: String
-    Description: "S3 key prefix for the agent code"
-    Default: "repo"
-  
+    Default: "Latest"
+    Description: Name for the agent alias
   BedrockModelId:
     Type: String
     Description: "The ID of the Foundation Model to use for the Agent"
     Default: "us.anthropic.claude-3-5-sonnet-20241022-v2:0"
+  AgentIAMRoleArn:
+    Type: String
+    Description: "(Optional) Amazon Bedrock Agents service role ARN"
+    Default: ""
+  KnowledgeBaseId:
+    Type: String
+    Description: "(Optional) Knowledge Base ID for RAG functionality"
+    Default: ""
+
+Conditions:
+  CreateAgentAliasCondition: !Not [!Equals [!Ref AgentAliasName, ""]]
+  AgentIAMRoleCondition: !Not [!Equals [!Ref AgentIAMRoleArn, ""]]
+  KnowledgeBaseCondition: !Not [!Equals [!Ref KnowledgeBaseId, ""]]
 
 Resources:
   ##################################################################
   # Lambda Function for Literature Curation
   ##################################################################
   
+  LiteratureCurationFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: LiteratureCurationPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - bedrock:RetrieveAndGenerate
+                  - bedrock:Retrieve
+                Resource: '*'
+                Condition:
+                  !If
+                    - KnowledgeBaseCondition
+                    - StringEquals:
+                        'bedrock:KnowledgeBaseId': !Ref KnowledgeBaseId
+                    - !Ref AWS::NoValue
+
   LiteratureCurationFunction:
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: !Sub "lit-search-${AWS::AccountId}"
       Runtime: python3.11
       Handler: lambda_function.lambda_handler
-      Role: !Ref AgentIAMRoleArn
+      Role: !GetAtt LiteratureCurationFunctionRole.Arn
       Timeout: 300
       MemorySize: 1024
       Environment:
         Variables:
           PUBMED_BASE_URL: "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
           MAX_RESULTS: "50"
+          KNOWLEDGE_BASE_ID: !Ref KnowledgeBaseId
       Code: "action-groups/literature-search"
       Tags:
         - Key: Project
           Value: "hcls-agents-toolkit"
         - Key: Agent
           Value: "literature-curator"
+
+  LiteratureCurationFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref LiteratureCurationFunction
+      Principal: bedrock.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent/*"
 
   ##################################################################
   # Bedrock Agent
@@ -55,7 +104,11 @@ Resources:
       AgentName: !Sub "${AWS::StackName}-literature-curator"
       Description: "Agent specialized in curating and analyzing scientific literature for healthcare and life sciences research"
       FoundationModel: !Ref BedrockModelId
-      AgentResourceRoleArn: !Ref AgentIAMRoleArn
+      AgentResourceRoleArn:
+        "Fn::If":
+          - AgentIAMRoleCondition
+          - !Ref AgentIAMRoleArn
+          - "{{resolve:ssm:/bedrock/agent/role/arn:1}}"
       Instruction: |
         You are a Literature Curator Agent specialized in healthcare and life sciences research. Your primary role is to:
 
@@ -161,54 +214,33 @@ Resources:
       Tags:
         Project: "hcls-agents-toolkit"
         Agent: "literature-curator"
+      KnowledgeBases:
+        "Fn::If":
+          - KnowledgeBaseCondition
+          - - KnowledgeBaseId: !Ref KnowledgeBaseId
+              Description: "Internal literature evidence database"
+              KnowledgeBaseState: "ENABLED"
+          - !Ref "AWS::NoValue"
 
-  ##################################################################
-  # Lambda Permission for Bedrock Agent
-  ##################################################################
-  
-  LiteratureCurationFunctionPermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      FunctionName: !Ref LiteratureCurationFunction
-      Action: lambda:InvokeFunction
-      Principal: bedrock.amazonaws.com
-      SourceArn: !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent/${LiteratureCuratorBedrockAgent}"
-
-  ##################################################################
-  # Agent Alias
-  ##################################################################
-  
-  LiteratureCuratorAgentAlias:
+  AgentAliasResource:
     Type: AWS::Bedrock::AgentAlias
+    Condition: CreateAgentAliasCondition
     Properties:
-      AgentId: !Ref LiteratureCuratorBedrockAgent
-      AgentAliasName: "PROD"
-      Description: "Production alias for Literature Curator Agent"
-      Tags:
-        Project: "hcls-agents-toolkit"
-        Agent: "literature-curator"
+      AgentId: !GetAtt LiteratureCuratorBedrockAgent.AgentId
+      AgentAliasName: !Ref AgentAliasName
 
 Outputs:
   AgentId:
-    Description: "Literature Curator Agent ID"
+    Description: Agent ID
     Value: !Ref LiteratureCuratorBedrockAgent
-    Export:
-      Name: !Sub "${AWS::StackName}-AgentId"
-  
   AgentAliasId:
-    Description: "Literature Curator Agent Alias ID"
-    Value: !GetAtt LiteratureCuratorAgentAlias.AgentAliasId
-    Export:
-      Name: !Sub "${AWS::StackName}-AgentAliasId"
-  
+    Description: Agent Alias ID
+    Value: !GetAtt AgentAliasResource.AgentAliasId
+    Condition: CreateAgentAliasCondition
   AgentAliasArn:
-    Description: "Literature Curator Agent Alias ARN"
-    Value: !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent-alias/${LiteratureCuratorBedrockAgent}/${LiteratureCuratorAgentAlias}"
-    Export:
-      Name: !Sub "${AWS::StackName}-AgentAliasArn"
-  
+    Description: Agent Alias ARN
+    Value: !GetAtt AgentAliasResource.AgentAliasArn
+    Condition: CreateAgentAliasCondition
   LambdaFunctionArn:
-    Description: "Literature Curation Lambda Function ARN"
+    Description: Lambda Function ARN
     Value: !GetAtt LiteratureCurationFunction.Arn
-    Export:
-      Name: !Sub "${AWS::StackName}-LambdaFunctionArn"

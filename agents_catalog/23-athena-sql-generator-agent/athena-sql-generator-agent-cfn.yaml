@@ -1,20 +1,11 @@
-AWSTemplateFormatVersion: '2010-09-09'
-Description: 'Athena SQL Generator Agent for HCLS Agents Toolkit'
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Creates the Athena SQL Generator Agent for analyzing data lakes by converting natural language questions to SQL statements and executing them on Amazon Athena.
 
 Parameters:
-  AgentIAMRoleArn:
+  AgentAliasName:
     Type: String
-    Description: "ARN of the IAM role for the Bedrock agent and Lambda function"
-  
-  S3CodeBucket:
-    Type: String
-    Description: "S3 bucket containing the agent code"
-  
-  S3CodeKey:
-    Type: String
-    Description: "S3 key prefix for the agent code"
-    Default: "repo"
-  
+    Default: "Latest"
+    Description: Name for the agent alias
   BedrockModelId:
     Type: String
     Description: "The ID of the Foundation Model to use for the Agent"
@@ -28,19 +19,75 @@ Parameters:
   AthenaResultsBucket:
     Type: String
     Description: "S3 bucket for Athena query results"
+  
+  AgentIAMRoleArn:
+    Type: String
+    Description: "(Optional) Amazon Bedrock Agents service role ARN"
+    Default: ""
+
+Conditions:
+  CreateAgentAliasCondition: !Not [!Equals [!Ref AgentAliasName, ""]]
+  AgentIAMRoleCondition: !Not [!Equals [!Ref AgentIAMRoleArn, ""]]
 
 Resources:
   ##################################################################
   # Lambda Function for Athena SQL Generation and Execution
   ##################################################################
   
+  AthenaSQLGeneratorFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AthenaAccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - athena:StartQueryExecution
+                  - athena:GetQueryExecution
+                  - athena:GetQueryResults
+                  - athena:StopQueryExecution
+                  - athena:ListQueryExecutions
+                  - athena:GetDataCatalog
+                  - athena:ListDataCatalogs
+                  - athena:ListDatabases
+                  - athena:ListTableMetadata
+                  - athena:GetTableMetadata
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - glue:GetDatabase
+                  - glue:GetDatabases
+                  - glue:GetTable
+                  - glue:GetTables
+                  - glue:GetPartitions
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:PutObject
+                Resource: 
+                  - !Sub "arn:aws:s3:::${AthenaResultsBucket}"
+                  - !Sub "arn:aws:s3:::${AthenaResultsBucket}/*"
+
   AthenaSQLGeneratorFunction:
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: !Sub "athena-sql-gen-${AWS::AccountId}"
       Runtime: python3.11
       Handler: lambda_function.lambda_handler
-      Role: !Ref AgentIAMRoleArn
+      Role: !GetAtt AthenaSQLGeneratorFunctionRole.Arn
       Timeout: 300
       MemorySize: 1024
       Environment:
@@ -55,6 +102,15 @@ Resources:
         - Key: Agent
           Value: "athena-sql-generator"
 
+  AthenaSQLGeneratorFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref AthenaSQLGeneratorFunction
+      Principal: bedrock.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent/*"
+
   ##################################################################
   # Bedrock Agent
   ##################################################################
@@ -65,7 +121,11 @@ Resources:
       AgentName: !Sub "${AWS::StackName}-athena-sql-generator"
       Description: "Agent specialized in generating and executing Athena SQL queries for healthcare data analysis"
       FoundationModel: !Ref BedrockModelId
-      AgentResourceRoleArn: !Ref AgentIAMRoleArn
+      AgentResourceRoleArn:
+        "Fn::If":
+          - AgentIAMRoleCondition
+          - !Ref AgentIAMRoleArn
+          - "{{resolve:ssm:/bedrock/agent/role/arn:1}}"
       Instruction: |
         You are an Athena SQL Generator Agent specialized in healthcare and life sciences data analysis. Your primary role is to:
 
@@ -142,7 +202,7 @@ Resources:
                                 "tables": {
                                   "type": "array",
                                   "items": {"type": "string"},
-                                  "description": "List of table names to include in query generation"
+                                  "description": "List of tables to include in the query"
                                 }
                               },
                               "required": ["description"]
@@ -152,17 +212,14 @@ Resources:
                       },
                       "responses": {
                         "200": {
-                          "description": "Successfully generated SQL query",
+                          "description": "Successful query generation",
                           "content": {
                             "application/json": {
                               "schema": {
                                 "type": "object",
                                 "properties": {
-                                  "description": {"type": "string"},
-                                  "database": {"type": "string"},
-                                  "generated_sql": {"type": "string"},
-                                  "table_schemas": {"type": "object"},
-                                  "timestamp": {"type": "string"}
+                                  "sql": {"type": "string"},
+                                  "explanation": {"type": "string"}
                                 }
                               }
                             }
@@ -173,8 +230,8 @@ Resources:
                   },
                   "/execute": {
                     "post": {
-                      "summary": "Execute SQL query in Athena",
-                      "description": "Execute a SQL query in Amazon Athena and return results",
+                      "summary": "Execute SQL query on Athena",
+                      "description": "Execute a SQL query on Amazon Athena and return the results",
                       "operationId": "executeSQL",
                       "requestBody": {
                         "required": true,
@@ -188,7 +245,7 @@ Resources:
                                   "enum": ["execute"],
                                   "default": "execute"
                                 },
-                                "sql_query": {
+                                "sql": {
                                   "type": "string",
                                   "description": "SQL query to execute"
                                 },
@@ -198,24 +255,23 @@ Resources:
                                   "default": "default"
                                 }
                               },
-                              "required": ["sql_query"]
+                              "required": ["sql"]
                             }
                           }
                         }
                       },
                       "responses": {
                         "200": {
-                          "description": "Query executed successfully",
+                          "description": "Successful query execution",
                           "content": {
                             "application/json": {
                               "schema": {
                                 "type": "object",
                                 "properties": {
-                                  "query_execution_id": {"type": "string"},
-                                  "status": {"type": "string"},
-                                  "results": {"type": "object"},
-                                  "row_count": {"type": "integer"},
-                                  "execution_time_ms": {"type": "integer"}
+                                  "columns": {"type": "array"},
+                                  "rows": {"type": "array"},
+                                  "execution_time": {"type": "number"},
+                                  "data_scanned": {"type": "string"}
                                 }
                               }
                             }
@@ -224,11 +280,11 @@ Resources:
                       }
                     }
                   },
-                  "/describe-tables": {
+                  "/schema": {
                     "post": {
-                      "summary": "List tables in database",
-                      "description": "Get list of tables in the specified database",
-                      "operationId": "describeTables",
+                      "summary": "Get database schema",
+                      "description": "Retrieve database schema information from Glue Data Catalog",
+                      "operationId": "getSchema",
                       "requestBody": {
                         "required": true,
                         "content": {
@@ -238,8 +294,8 @@ Resources:
                               "properties": {
                                 "action": {
                                   "type": "string",
-                                  "enum": ["describe_tables"],
-                                  "default": "describe_tables"
+                                  "enum": ["schema"],
+                                  "default": "schema"
                                 },
                                 "database": {
                                   "type": "string",
@@ -253,66 +309,14 @@ Resources:
                       },
                       "responses": {
                         "200": {
-                          "description": "Tables listed successfully",
+                          "description": "Successful schema retrieval",
                           "content": {
                             "application/json": {
                               "schema": {
                                 "type": "object",
                                 "properties": {
                                   "database": {"type": "string"},
-                                  "tables": {"type": "array"},
-                                  "table_count": {"type": "integer"}
-                                }
-                              }
-                            }
-                          }
-                        }
-                      }
-                    }
-                  },
-                  "/get-schema": {
-                    "post": {
-                      "summary": "Get table schema",
-                      "description": "Get detailed schema information for a specific table",
-                      "operationId": "getTableSchema",
-                      "requestBody": {
-                        "required": true,
-                        "content": {
-                          "application/json": {
-                            "schema": {
-                              "type": "object",
-                              "properties": {
-                                "action": {
-                                  "type": "string",
-                                  "enum": ["get_schema"],
-                                  "default": "get_schema"
-                                },
-                                "database": {
-                                  "type": "string",
-                                  "description": "Database name",
-                                  "default": "default"
-                                },
-                                "table_name": {
-                                  "type": "string",
-                                  "description": "Table name"
-                                }
-                              },
-                              "required": ["table_name"]
-                            }
-                          }
-                        }
-                      },
-                      "responses": {
-                        "200": {
-                          "description": "Schema retrieved successfully",
-                          "content": {
-                            "application/json": {
-                              "schema": {
-                                "type": "object",
-                                "properties": {
-                                  "database": {"type": "string"},
-                                  "table_name": {"type": "string"},
-                                  "schema": {"type": "object"}
+                                  "tables": {"type": "object"}
                                 }
                               }
                             }
@@ -327,53 +331,25 @@ Resources:
         Project: "hcls-agents-toolkit"
         Agent: "athena-sql-generator"
 
-  ##################################################################
-  # Lambda Permission for Bedrock Agent
-  ##################################################################
-  
-  AthenaSQLGeneratorFunctionPermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      FunctionName: !Ref AthenaSQLGeneratorFunction
-      Action: lambda:InvokeFunction
-      Principal: bedrock.amazonaws.com
-      SourceArn: !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent/${AthenaSQLGeneratorBedrockAgent}"
-
-  ##################################################################
-  # Agent Alias
-  ##################################################################
-  
-  AthenaSQLGeneratorAgentAlias:
+  AgentAliasResource:
     Type: AWS::Bedrock::AgentAlias
+    Condition: CreateAgentAliasCondition
     Properties:
-      AgentId: !Ref AthenaSQLGeneratorBedrockAgent
-      AgentAliasName: "PROD"
-      Description: "Production alias for Athena SQL Generator Agent"
-      Tags:
-        Project: "hcls-agents-toolkit"
-        Agent: "athena-sql-generator"
+      AgentId: !GetAtt AthenaSQLGeneratorBedrockAgent.AgentId
+      AgentAliasName: !Ref AgentAliasName
 
 Outputs:
   AgentId:
-    Description: "Athena SQL Generator Agent ID"
+    Description: Agent ID
     Value: !Ref AthenaSQLGeneratorBedrockAgent
-    Export:
-      Name: !Sub "${AWS::StackName}-AgentId"
-  
   AgentAliasId:
-    Description: "Athena SQL Generator Agent Alias ID"
-    Value: !GetAtt AthenaSQLGeneratorAgentAlias.AgentAliasId
-    Export:
-      Name: !Sub "${AWS::StackName}-AgentAliasId"
-  
+    Description: Agent Alias ID
+    Value: !GetAtt AgentAliasResource.AgentAliasId
+    Condition: CreateAgentAliasCondition
   AgentAliasArn:
-    Description: "Athena SQL Generator Agent Alias ARN"
-    Value: !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent-alias/${AthenaSQLGeneratorBedrockAgent}/${AthenaSQLGeneratorAgentAlias}"
-    Export:
-      Name: !Sub "${AWS::StackName}-AgentAliasArn"
-  
+    Description: Agent Alias ARN
+    Value: !GetAtt AgentAliasResource.AgentAliasArn
+    Condition: CreateAgentAliasCondition
   LambdaFunctionArn:
-    Description: "Athena SQL Generator Lambda Function ARN"
+    Description: Lambda Function ARN
     Value: !GetAtt AthenaSQLGeneratorFunction.Arn
-    Export:
-      Name: !Sub "${AWS::StackName}-LambdaFunctionArn"

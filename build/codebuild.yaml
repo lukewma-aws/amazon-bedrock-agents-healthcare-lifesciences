@@ -10,6 +10,14 @@ Parameters:
   S3Bucket:
     Type: String
     Description: S3Bucket for CodeBuild
+  AgentNumber:
+    Type: String
+    Description: "Optional agent number to build (e.g., '22' for agent #22). If empty, all agents will be built."
+    Default: ""
+  UseLocalFiles:
+    Type: String
+    Description: "Whether to use local files uploaded to S3 (true/false)"
+    Default: "false"
 
 Resources:
   S3BucketPolicy:
@@ -248,20 +256,38 @@ Resources:
               S3_BUCKET: ${S3Bucket}
               GIT_BRANCH: ${GitBranch}
               GITHUB_LINK: ${GithubLink}
+              AGENT_NUMBER: ${AgentNumber}
+              USE_LOCAL_FILES: ${UseLocalFiles}
           phases:
             install:
               runtime-versions:
                 python: 3.8
             pre_build:
               commands:
-                - echo Cloning the repository
-                - git clone -b $GIT_BRANCH --single-branch $GITHUB_LINK repo
-                - cd repo
+                - |
+                  if [ "$USE_LOCAL_FILES" = "true" ] && [ ! -z "$AGENT_NUMBER" ]; then
+                    echo "Using local files for agent #$AGENT_NUMBER"
+                    mkdir -p repo
+                    aws s3 cp s3://$S3_BUCKET/local_agents/agent_$AGENT_NUMBER.zip ./agent.zip
+                    unzip -q ./agent.zip -d repo
+                    cd repo
+                    ls -la
+                  else
+                    echo "Cloning the repository from GitHub"
+                    git clone -b $GIT_BRANCH --single-branch $GITHUB_LINK repo
+                    cd repo
+                  fi
                 - chmod +x build/build_agents.sh
             build:
               commands:
-                - echo Processing agent templates
-                - ./build/build_agents.sh
+                - |
+                  if [ -z "$AGENT_NUMBER" ]; then
+                    echo "Processing all agent templates"
+                    ./build/build_agents.sh
+                  else
+                    echo "Processing only agent #$AGENT_NUMBER"
+                    ./build/build_agents.sh --agent $AGENT_NUMBER
+                  fi
             post_build:
               commands:
                 - JSON_DATA=$( jq -n '{Status:"SUCCESS", Reason:"Configuration Complete","UniqueId":"AgentCodeBuild", "Data":"Application has completed configuration."}' )
