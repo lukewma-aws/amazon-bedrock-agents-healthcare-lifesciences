@@ -18,6 +18,14 @@ Parameters:
     Type: String
     Description: "(Optional) Knowledge Base ID for RAG functionality"
     Default: ""
+  S3CodeBucket:
+    Type: String
+    Description: "S3 bucket containing code artifacts (not used in this template but required for compatibility)"
+    Default: "genovia-deployment"
+  S3CodeKey:
+    Type: String
+    Description: "S3 key prefix for code artifacts (not used in this template but required for compatibility)"
+    Default: "repo"
 
 Conditions:
   CreateAgentAliasCondition: !Not [!Equals [!Ref AgentAliasName, ""]]

@@ -387,6 +387,7 @@ Resources:
         S3CodeBucket: !Ref S3Bucket
         S3CodeKey: !GetAtt CodeRepo.Outputs.S3Key
       TimeoutInMinutes: 10
+      OnFailure: DO_NOTHING
       Tags:
         - Key: Project
           Value: "hcls-agents-toolkit"
@@ -402,6 +403,7 @@ Resources:
         S3CodeBucket: !Ref S3Bucket
         S3CodeKey: !GetAtt CodeRepo.Outputs.S3Key
       TimeoutInMinutes: 10
+      OnFailure: DO_NOTHING
       Tags:
         - Key: Project
           Value: "hcls-agents-toolkit"          
@@ -417,6 +419,7 @@ Resources:
         S3CodeBucket: !Ref S3Bucket
         S3CodeKey: !GetAtt CodeRepo.Outputs.S3Key
       TimeoutInMinutes: 10
+      OnFailure: DO_NOTHING
       Tags:
         - Key: Project
           Value: "hcls-agents-toolkit"
