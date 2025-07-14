@@ -7,3 +7,41 @@ node_modules
 .kiro
 .amazonq
 __pycache__
+
+# Deployment and build artifacts
+temp_packaged_templates/
+packaged_*.yaml
+packaged-template*.yaml
+deployed-agents.csv
+agent-iam-role.yaml
+
+# CloudFormation temporary files
+.aws-sam/
+.serverless/
+
+# Local environment files
+.env
+.env.local
+
+# Log files
+*.log
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*~
+
+# IDE specific files
+.idea/
+.vscode/
+*.sublime-workspace
+*.sublime-project
+
+# Generated documentation
+iam-role-considerations.md
+
+# Build directories
+dist/
+target/
+build-output/

@@ -1,389 +1,214 @@
-AWSTemplateFormatVersion: "2010-09-09"
-Description: Creates the Literature Curator Agent for retrieving and summarizing insights from scientific literature using PubMed APIs and Amazon Bedrock Knowledge Bases.
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Literature Curator Agent for HCLS Agents Toolkit'
 
 Parameters:
-  AgentAliasName:
-    Type: String
-    Default: "Latest"
-    Description: Name for the agent alias
-  BedrockModelId:
-    Type: String
-    Description: The ID of the Foundation Model to use for the Agent
-    Default: us.anthropic.claude-3-5-sonnet-20241022-v2:0
   AgentIAMRoleArn:
     Type: String
-    Description: (Optional) Amazon Bedrock Agents service role ARN
-    Default: ""
-  KnowledgeBaseId:
+    Description: "ARN of the IAM role for the Bedrock agent and Lambda function"
+  
+  S3CodeBucket:
     Type: String
-    Description: (Optional) Knowledge Base ID for RAG functionality
-    Default: ""
-
-Conditions:
-  CreateAgentAliasCondition: !Not [!Equals [!Ref AgentAliasName, ""]]
-  AgentIAMRoleCondition: !Not [!Equals [!Ref AgentIAMRoleArn, ""]]
-  KnowledgeBaseCondition: !Not [!Equals [!Ref KnowledgeBaseId, ""]]
+    Description: "S3 bucket containing the agent code"
+  
+  S3CodeKey:
+    Type: String
+    Description: "S3 key prefix for the agent code"
+    Default: "repo"
+  
+  BedrockModelId:
+    Type: String
+    Description: "The ID of the Foundation Model to use for the Agent"
+    Default: "us.anthropic.claude-3-5-sonnet-20241022-v2:0"
 
 Resources:
-  ########################
-  ##### PubMed Search #####
-  ########################
-
-  PubMedSearchLambdaRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: 2012-10-17
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service:
-                - lambda.amazonaws.com
-            Action:
-              - sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-      Policies:
-        - PolicyName: BedrockKnowledgeBaseAccess
-          PolicyDocument:
-            Version: 2012-10-17
-            Statement:
-              - Effect: Allow
-                Action:
-                  - bedrock:RetrieveAndGenerate
-                  - bedrock:Retrieve
-                Resource: "*"
-
-  PubMedSearchLogGroup:
-    Type: AWS::Logs::LogGroup
-    Properties:
-      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-pubmed-search"
-      RetentionInDays: 14
-
-  PubMedSearchLambdaFunction:
+  ##################################################################
+  # Lambda Function for Literature Curation
+  ##################################################################
+  
+  LiteratureCurationFunction:
     Type: AWS::Lambda::Function
-    #DeletionPolicy: Retain
     Properties:
-      FunctionName: "PubMedSearch"
-      Role: !GetAtt PubMedSearchLambdaRole.Arn
-      Runtime: python3.12
+      FunctionName: !Sub "lit-search-${AWS::AccountId}"
+      Runtime: python3.11
       Handler: lambda_function.lambda_handler
-      Timeout: 60
-      MemorySize: 512
+      Role: !Ref AgentIAMRoleArn
+      Timeout: 300
+      MemorySize: 1024
       Environment:
         Variables:
-          LOG_LEVEL: "INFO"
-          KNOWLEDGE_BASE_ID: !Ref KnowledgeBaseId
-      Code:
-        ZipFile: |
-          import json
-          import logging
-          import urllib.request
-          import urllib.parse
-          import xml.etree.ElementTree as ET
-          import os
-          import boto3
-          from typing import Dict, List, Any
+          PUBMED_BASE_URL: "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
+          MAX_RESULTS: "50"
+      Code: "action-groups/literature-search"
+      Tags:
+        - Key: Project
+          Value: "hcls-agents-toolkit"
+        - Key: Agent
+          Value: "literature-curator"
 
-          logger = logging.getLogger()
-          logger.setLevel(logging.INFO)
+  ##################################################################
+  # Bedrock Agent
+  ##################################################################
+  
+  LiteratureCuratorBedrockAgent:
+    Type: AWS::Bedrock::Agent
+    Properties:
+      AgentName: !Sub "${AWS::StackName}-literature-curator"
+      Description: "Agent specialized in curating and analyzing scientific literature for healthcare and life sciences research"
+      FoundationModel: !Ref BedrockModelId
+      AgentResourceRoleArn: !Ref AgentIAMRoleArn
+      Instruction: |
+        You are a Literature Curator Agent specialized in healthcare and life sciences research. Your primary role is to:
 
-          def lambda_handler(event, context):
-              """
-              Lambda function to search PubMed for biomedical literature
-              """
-              try:
-                  logger.info(f"Received event: {json.dumps(event)}")
-                  
-                  # Extract parameters from the event
-                  parameters = event.get('parameters', [])
-                  param_dict = {param['name']: param['value'] for param in parameters}
-                  
-                  query = param_dict.get('query', '')
-                  max_results = int(param_dict.get('max_results', 10))
-                  
-                  if not query:
-                      return {
-                          'response': {
-                              'actionGroupInvocationOutput': {
-                                  'text': 'Error: Query parameter is required'
+        1. **Search and Retrieve**: Find relevant scientific literature from PubMed and other databases
+        2. **Analyze and Curate**: Evaluate the quality, relevance, and credibility of research papers
+        3. **Summarize Findings**: Provide concise summaries of key research findings
+        4. **Identify Trends**: Recognize patterns and emerging trends in the literature
+        5. **Quality Assessment**: Assess the methodological quality and statistical significance of studies
+
+        Key capabilities:
+        - Search PubMed using advanced query techniques
+        - Filter results by publication date, journal impact factor, and study type
+        - Extract key information including study design, sample size, outcomes, and conclusions
+        - Identify systematic reviews, meta-analyses, and high-quality clinical trials
+        - Provide citation information in standard formats
+        - Flag potential conflicts of interest or study limitations
+
+        When responding:
+        - Always provide source citations with PMID numbers
+        - Indicate the level of evidence (e.g., systematic review, RCT, observational study)
+        - Highlight any limitations or potential biases in the research
+        - Suggest related search terms or areas for further investigation
+        - Prioritize recent, high-quality publications from reputable journals
+
+        Focus areas include biomarker discovery, clinical trials, precision medicine, genomics, and therapeutic interventions.
+      ActionGroups:
+        - ActionGroupName: "literature-search"
+          Description: "Search and curate scientific literature"
+          ActionGroupExecutor:
+            Lambda: !GetAtt LiteratureCurationFunction.Arn
+          ApiSchema:
+            Payload: |
+              {
+                "openapi": "3.0.0",
+                "info": {
+                  "title": "Literature Curation API",
+                  "version": "1.0.0",
+                  "description": "API for searching and curating scientific literature"
+                },
+                "paths": {
+                  "/search": {
+                    "post": {
+                      "summary": "Search and curate scientific literature",
+                      "description": "Search PubMed for scientific articles and provide curated results with relevance scoring",
+                      "operationId": "searchLiterature",
+                      "requestBody": {
+                        "required": true,
+                        "content": {
+                          "application/json": {
+                            "schema": {
+                              "type": "object",
+                              "properties": {
+                                "query": {
+                                  "type": "string",
+                                  "description": "Search query for PubMed"
+                                },
+                                "max_results": {
+                                  "type": "integer",
+                                  "description": "Maximum number of results to return",
+                                  "default": 20
+                                },
+                                "search_type": {
+                                  "type": "string",
+                                  "description": "Type of search (general, biomarker, clinical_trial, review)",
+                                  "default": "general"
+                                }
+                              },
+                              "required": ["query"]
+                            }
+                          }
+                        }
+                      },
+                      "responses": {
+                        "200": {
+                          "description": "Successful literature search and curation",
+                          "content": {
+                            "application/json": {
+                              "schema": {
+                                "type": "object",
+                                "properties": {
+                                  "query": {"type": "string"},
+                                  "total_results": {"type": "integer"},
+                                  "curated_results": {
+                                    "type": "object",
+                                    "properties": {
+                                      "high_relevance": {"type": "array"},
+                                      "medium_relevance": {"type": "array"},
+                                      "low_relevance": {"type": "array"},
+                                      "summary": {"type": "object"}
+                                    }
+                                  },
+                                  "search_timestamp": {"type": "string"}
+                                }
                               }
+                            }
                           }
+                        }
                       }
-                  
-                  # Search PubMed
-                  results = search_pubmed(query, max_results)
-                  
-                  return {
-                      'response': {
-                          'actionGroupInvocationOutput': {
-                              'text': json.dumps(results, indent=2)
-                          }
-                      }
+                    }
                   }
-                  
-              except Exception as e:
-                  logger.error(f"Error in lambda_handler: {str(e)}")
-                  return {
-                      'response': {
-                          'actionGroupInvocationOutput': {
-                              'text': f'Error processing request: {str(e)}'
-                          }
-                      }
-                  }
+                }
+              }
+      Tags:
+        Project: "hcls-agents-toolkit"
+        Agent: "literature-curator"
 
-          def search_pubmed(query: str, max_results: int = 10) -> Dict[str, Any]:
-              """
-              Search PubMed for articles matching the query
-              """
-              try:
-                  # URL encode the query
-                  encoded_query = urllib.parse.quote(query)
-                  
-                  # Search PubMed for article IDs
-                  search_url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term={encoded_query}&retmax={max_results}&retmode=xml"
-                  
-                  with urllib.request.urlopen(search_url) as response:
-                      search_data = response.read()
-                  
-                  # Parse XML response
-                  root = ET.fromstring(search_data)
-                  id_list = root.find('.//IdList')
-                  
-                  if id_list is None or len(id_list) == 0:
-                      return {
-                          'query': query,
-                          'total_results': 0,
-                          'articles': []
-                      }
-                  
-                  # Get article IDs
-                  article_ids = [id_elem.text for id_elem in id_list.findall('Id')]
-                  
-                  # Fetch article details
-                  if article_ids:
-                      ids_str = ','.join(article_ids)
-                      fetch_url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed&id={ids_str}&retmode=xml"
-                      
-                      with urllib.request.urlopen(fetch_url) as response:
-                          fetch_data = response.read()
-                      
-                      articles = parse_pubmed_articles(fetch_data)
-                  else:
-                      articles = []
-                  
-                  return {
-                      'query': query,
-                      'total_results': len(articles),
-                      'articles': articles
-                  }
-                  
-              except Exception as e:
-                  logger.error(f"Error searching PubMed: {str(e)}")
-                  return {
-                      'query': query,
-                      'error': str(e),
-                      'total_results': 0,
-                      'articles': []
-                  }
-
-          def parse_pubmed_articles(xml_data: bytes) -> List[Dict[str, Any]]:
-              """
-              Parse PubMed XML response to extract article information
-              """
-              articles = []
-              
-              try:
-                  root = ET.fromstring(xml_data)
-                  
-                  for article in root.findall('.//PubmedArticle'):
-                      try:
-                          # Extract PMID
-                          pmid_elem = article.find('.//PMID')
-                          pmid = pmid_elem.text if pmid_elem is not None else 'Unknown'
-                          
-                          # Extract title
-                          title_elem = article.find('.//ArticleTitle')
-                          title = title_elem.text if title_elem is not None else 'No title available'
-                          
-                          # Extract abstract
-                          abstract_elem = article.find('.//Abstract/AbstractText')
-                          abstract = abstract_elem.text if abstract_elem is not None else 'No abstract available'
-                          
-                          # Extract authors
-                          authors = []
-                          author_list = article.find('.//AuthorList')
-                          if author_list is not None:
-                              for author in author_list.findall('Author'):
-                                  last_name = author.find('LastName')
-                                  first_name = author.find('ForeName')
-                                  if last_name is not None and first_name is not None:
-                                      authors.append(f"{first_name.text} {last_name.text}")
-                          
-                          # Extract journal
-                          journal_elem = article.find('.//Journal/Title')
-                          journal = journal_elem.text if journal_elem is not None else 'Unknown journal'
-                          
-                          # Extract publication date
-                          pub_date = article.find('.//PubDate')
-                          pub_year = 'Unknown'
-                          if pub_date is not None:
-                              year_elem = pub_date.find('Year')
-                              if year_elem is not None:
-                                  pub_year = year_elem.text
-                          
-                          articles.append({
-                              'pmid': pmid,
-                              'title': title,
-                              'abstract': abstract,
-                              'authors': authors,
-                              'journal': journal,
-                              'publication_year': pub_year,
-                              'url': f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
-                          })
-                          
-                      except Exception as e:
-                          logger.error(f"Error parsing individual article: {str(e)}")
-                          continue
-                  
-              except Exception as e:
-                  logger.error(f"Error parsing XML: {str(e)}")
-              
-              return articles
-
-  PubMedSearchLambdaPermission:
+  ##################################################################
+  # Lambda Permission for Bedrock Agent
+  ##################################################################
+  
+  LiteratureCurationFunctionPermission:
     Type: AWS::Lambda::Permission
     Properties:
+      FunctionName: !Ref LiteratureCurationFunction
       Action: lambda:InvokeFunction
-      FunctionName: !GetAtt PubMedSearchLambdaFunction.Arn
       Principal: bedrock.amazonaws.com
-      SourceAccount: !Ref AWS::AccountId
-      SourceArn: !Sub arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent/*
+      SourceArn: !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent/${LiteratureCuratorBedrockAgent}"
 
-  #####################
-  ##### Agent #####
-  ###################
-
-  LiteratureCuratorAgent:
-    Type: AWS::Bedrock::Agent
-    #DeletionPolicy: Retain
-    Properties:
-      ActionGroups:
-        - ActionGroupName: "UserInputAction"
-          ParentActionGroupSignature: "AMAZON.UserInput"
-          ActionGroupState: "ENABLED"
-        - ActionGroupName: PubMedSearch
-          Description: Search PubMed for biomedical literature and research articles
-          ActionGroupExecutor:
-            Lambda: !GetAtt PubMedSearchLambdaFunction.Arn
-          ActionGroupState: ENABLED
-          FunctionSchema:
-            Functions:
-              - Name: search_pubmed
-                Description: Search PubMed database for biomedical literature using keywords, topics, or research questions. Returns relevant articles with abstracts, authors, and publication details.
-                Parameters:
-                  query:
-                    Description: "Search query for PubMed (e.g., 'EGFR mutations lung cancer', 'biomarkers breast cancer', 'immunotherapy melanoma')"
-                    Type: string
-                    Required: True
-                  max_results:
-                    Description: "Maximum number of articles to return (default: 10, max: 50)"
-                    Type: integer
-                    Required: False
-      AgentName: "Literature-Curator-Agent"
-      AgentResourceRoleArn:
-        "Fn::If":
-          - AgentIAMRoleCondition
-          - !Ref AgentIAMRoleArn
-          - "{{resolve:ssm:/bedrock/agent/role/arn:1}}"
-      AutoPrepare: True
-      Description: "Curates and organizes scientific literature by retrieving, analyzing, and summarizing research articles from PubMed and internal knowledge bases"
-      FoundationModel: !Ref BedrockModelId
-      GuardrailConfiguration:
-        GuardrailIdentifier: !GetAtt LiteratureCuratorGuardrail.GuardrailId
-        GuardrailVersion: !GetAtt LiteratureCuratorGuardrail.Version
-      KnowledgeBases:
-        "Fn::If":
-          - KnowledgeBaseCondition
-          - - KnowledgeBaseId: !Ref KnowledgeBaseId
-              Description: "Internal literature evidence database"
-              KnowledgeBaseState: "ENABLED"
-          - !Ref "AWS::NoValue"
-      Instruction: |
-        You are a literature curator specializing in organizing and managing scientific literature collections. Your role is to help users discover, categorize, and synthesize research articles from biomedical literature databases.
-
-        You have access to the following tools:
-
-        - search_pubmed: Search the PubMed database for biomedical literature using keywords, topics, or research questions. This returns relevant articles with abstracts, authors, and publication details.
-        - Knowledge Base (if available): Access to internal literature evidence database for additional research context.
-
-        Curation Process
-
-        1. Understand the user's literature search or curation needs
-        2. Use search_pubmed to find relevant scientific literature from PubMed
-        3. Organize and categorize the retrieved articles by themes, methodologies, or research areas
-        4. Create structured summaries and literature reviews
-        5. If available, cross-reference with knowledge base information
-        6. Present findings in organized, searchable formats
-
-        Response Guidelines
-
-        - Organize literature by relevant categories (e.g., study type, methodology, findings)
-        - Provide comprehensive bibliographic information for each article
-        - Create thematic summaries highlighting key research trends
-        - Identify seminal papers and recent developments in the field
-        - Note research gaps and emerging areas of investigation
-        - Use consistent citation formats and maintain detailed references
-        - Structure responses with clear sections and hierarchical organization
-        - Highlight methodological approaches and study limitations
-
-        Curation Specialties
-
-        - Systematic literature reviews and meta-analyses
-        - Research trend analysis and bibliometric studies
-        - Topic-specific literature collections
-        - Comparative analysis of research methodologies
-        - Identification of key opinion leaders and influential papers
-        - Literature gap analysis and future research directions
-
-  AgentAliasResource:
+  ##################################################################
+  # Agent Alias
+  ##################################################################
+  
+  LiteratureCuratorAgentAlias:
     Type: AWS::Bedrock::AgentAlias
-    Condition: CreateAgentAliasCondition
     Properties:
-      AgentId: !GetAtt LiteratureCuratorAgent.AgentId
-      AgentAliasName: !Ref AgentAliasName
-
-  LiteratureCuratorGuardrail:
-    Type: AWS::Bedrock::Guardrail
-    Properties:
-      BlockedInputMessaging: "Sorry, your query violates our usage policies."
-      BlockedOutputsMessaging: "Sorry, I am unable to reply because the output violates our usage policies."
-      ContentPolicyConfig:
-        FiltersConfig:
-          - InputStrength: "HIGH"
-            OutputStrength: "HIGH"
-            Type: "MISCONDUCT"
-          - InputStrength: "HIGH"
-            OutputStrength: "NONE"
-            Type: "PROMPT_ATTACK"
-      Description: Guardrail for Literature Curator agent to block harmful content.
-      Name: LiteratureCuratorGuardrail
-      WordPolicyConfig:
-        ManagedWordListsConfig:
-          - Type: PROFANITY
+      AgentId: !Ref LiteratureCuratorBedrockAgent
+      AgentAliasName: "PROD"
+      Description: "Production alias for Literature Curator Agent"
+      Tags:
+        Project: "hcls-agents-toolkit"
+        Agent: "literature-curator"
 
 Outputs:
   AgentId:
-    Description: Agent ID
-    Value: !Ref LiteratureCuratorAgent
+    Description: "Literature Curator Agent ID"
+    Value: !Ref LiteratureCuratorBedrockAgent
+    Export:
+      Name: !Sub "${AWS::StackName}-AgentId"
+  
   AgentAliasId:
-    Description: Agent Alias ID
-    Value: !GetAtt AgentAliasResource.AgentAliasId
-    Condition: CreateAgentAliasCondition
+    Description: "Literature Curator Agent Alias ID"
+    Value: !GetAtt LiteratureCuratorAgentAlias.AgentAliasId
+    Export:
+      Name: !Sub "${AWS::StackName}-AgentAliasId"
+  
   AgentAliasArn:
-    Description: Agent Alias ARN
-    Value: !GetAtt AgentAliasResource.AgentAliasArn
-    Condition: CreateAgentAliasCondition
-  PubMedLambdaFunctionArn:
-    Description: PubMed Search Lambda Function ARN
-    Value: !GetAtt PubMedSearchLambdaFunction.Arn
+    Description: "Literature Curator Agent Alias ARN"
+    Value: !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent-alias/${LiteratureCuratorBedrockAgent}/${LiteratureCuratorAgentAlias}"
+    Export:
+      Name: !Sub "${AWS::StackName}-AgentAliasArn"
+  
+  LambdaFunctionArn:
+    Description: "Literature Curation Lambda Function ARN"
+    Value: !GetAtt LiteratureCurationFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-LambdaFunctionArn"

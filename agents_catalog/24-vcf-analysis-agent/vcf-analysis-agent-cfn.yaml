@@ -1,0 +1,328 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'VCF Analysis Bedrock Agent with Claude 3.5 Sonnet'
+
+Parameters:
+  VcfBucketName:
+    Type: String
+    Default: 'vcf-data-888689904396'
+    Description: 'S3 bucket name for VCF files'
+  
+  QueryResultsBucketName:
+    Type: String
+    Default: 'vcf-query-results-888689904396'
+    Description: 'S3 bucket name for Athena query results'
+    
+  AgentIAMRoleArn:
+    Type: String
+    Description: 'IAM Role ARN for Bedrock Agent'
+    
+  S3CodeBucket:
+    Type: String
+    Description: "S3 bucket containing the agent code"
+    
+  S3CodeKey:
+    Type: String
+    Description: "S3 key prefix for the agent code"
+    Default: "repo"
+    
+  BedrockModelId:
+    Type: String
+    Description: "The ID of the Foundation Model to use for the Agent"
+    Default: "anthropic.claude-3-haiku-20240307-v1:0"
+
+Resources:
+  # S3 Buckets
+  VcfDataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref VcfBucketName
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+
+  QueryResultsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref QueryResultsBucketName
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteQueryResults
+            Status: Enabled
+            ExpirationInDays: 7
+
+  # Glue Database for Athena
+  VcfGlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: vcf_database
+        Description: 'Database for VCF variant analysis'
+
+  # Glue Table for VCF data
+  VcfGlueTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref VcfGlueDatabase
+      TableInput:
+        Name: vcf_variants
+        Description: 'VCF variants table'
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: 'csv'
+          delimiter: '\t'
+          skip.header.line.count: '1'
+        StorageDescriptor:
+          Columns:
+            - Name: chrom
+              Type: string
+            - Name: pos
+              Type: bigint
+            - Name: id
+              Type: string
+            - Name: ref
+              Type: string
+            - Name: alt
+              Type: string
+            - Name: qual
+              Type: double
+            - Name: filter
+              Type: string
+            - Name: info
+              Type: string
+            - Name: format
+              Type: string
+            - Name: sample_data
+              Type: string
+          Location: !Sub 's3://${VcfBucketName}/'
+          InputFormat: 'org.apache.hadoop.mapred.TextInputFormat'
+          OutputFormat: 'org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat'
+          SerdeInfo:
+            SerializationLibrary: 'org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe'
+            Parameters:
+              field.delim: '\t'
+
+  # IAM Role for Lambda
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: VcfQueryPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - athena:StartQueryExecution
+                  - athena:GetQueryExecution
+                  - athena:GetQueryResults
+                  - athena:StopQueryExecution
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource:
+                  - !Sub 'arn:aws:s3:::${VcfBucketName}/*'
+                  - !Sub 'arn:aws:s3:::${QueryResultsBucketName}/*'
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Resource:
+                  - !Sub 'arn:aws:s3:::${VcfBucketName}'
+                  - !Sub 'arn:aws:s3:::${QueryResultsBucketName}'
+              - Effect: Allow
+                Action:
+                  - glue:GetDatabase
+                  - glue:GetTable
+                  - glue:GetPartitions
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource: 
+                  - 'arn:aws:bedrock:*::foundation-model/anthropic.claude-3-5-sonnet-20240620-v1:0'
+                  - 'arn:aws:bedrock:*::foundation-model/anthropic.claude-3-haiku-20240307-v1:0'
+
+  # Lambda Function
+  VcfQueryLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "vcf-query-${AWS::AccountId}"
+      Runtime: python3.11
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          ATHENA_DATABASE: vcf_database
+          ATHENA_TABLE: vcf_variants
+          ATHENA_OUTPUT_BUCKET: !Ref QueryResultsBucketName
+      Code: "action-groups/vcf-query"
+
+  # Lambda Permission for Bedrock Agent
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref VcfQueryLambda
+      Action: lambda:InvokeFunction
+      Principal: bedrock.amazonaws.com
+      SourceArn: !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent/*'
+
+  # Bedrock Agent
+  VcfBedrockAgent:
+    Type: AWS::Bedrock::Agent
+    Properties:
+      AgentName: vcf-analysis-agent
+      Description: 'Natural language to SQL agent for VCF variant analysis'
+      FoundationModel: 'anthropic.claude-3-haiku-20240307-v1:0'
+      Instruction: |
+        You are a genomics expert powered by Claude 3 Haiku, specializing in VCF (Variant Call Format) analysis. 
+        Your role is to help users query and analyze genetic variant data using natural language.
+        
+        You can help users:
+        - Find pathogenic or benign variants
+        - Query variants by chromosome or position
+        - Filter variants by quality scores
+        - Analyze variant annotations
+        
+        When users ask questions about variants, use the query-vcf action to convert their 
+        natural language request into SQL and execute it against the VCF database.
+        
+        Always explain the results in a clear, scientific manner and provide context about 
+        the biological significance of the findings when appropriate.
+      AgentResourceRoleArn: !Ref AgentIAMRoleArn
+      ActionGroups:
+        - ActionGroupName: vcf-query-action-group
+          Description: 'Action group for querying VCF data'
+          ActionGroupExecutor:
+            Lambda: !GetAtt VcfQueryLambda.Arn
+          ApiSchema:
+            Payload: |
+              {
+                "openapi": "3.0.0",
+                "info": {
+                  "title": "VCF Query API",
+                  "description": "API for querying VCF files using natural language",
+                  "version": "1.0.0"
+                },
+                "paths": {
+                  "/query-vcf": {
+                    "post": {
+                      "summary": "Query VCF data using natural language",
+                      "description": "Converts natural language queries to SQL and executes them against VCF data",
+                      "operationId": "queryVcfData",
+                      "requestBody": {
+                        "required": true,
+                        "content": {
+                          "application/json": {
+                            "schema": {
+                              "type": "object",
+                              "properties": {
+                                "query": {
+                                  "type": "string",
+                                  "description": "Natural language query about VCF data"
+                                }
+                              },
+                              "required": ["query"]
+                            }
+                          }
+                        }
+                      },
+                      "responses": {
+                        "200": {
+                          "description": "Successful query execution",
+                          "content": {
+                            "application/json": {
+                              "schema": {
+                                "type": "object",
+                                "properties": {
+                                  "query": {"type": "string"},
+                                  "sql": {"type": "string"},
+                                  "results": {"type": "array"}
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+
+  # Bedrock Agent Alias
+  VcfBedrockAgentAlias:
+    Type: AWS::Bedrock::AgentAlias
+    Properties:
+      AgentId: !Ref VcfBedrockAgent
+      AgentAliasName: "PROD"
+      Description: "Production alias for VCF Analysis Agent"
+      Tags:
+        Project: "hcls-agents-toolkit"
+        Agent: "vcf-analysis-agent"
+
+Outputs:
+  VcfBucketName:
+    Description: 'S3 bucket for VCF files'
+    Value: !Ref VcfDataBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-VcfBucket'
+
+  QueryResultsBucketName:
+    Description: 'S3 bucket for Athena query results'
+    Value: !Ref QueryResultsBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-QueryResultsBucket'
+
+  LambdaFunctionArn:
+    Description: 'Lambda function ARN'
+    Value: !GetAtt VcfQueryLambda.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaArn'
+
+  BedrockAgentId:
+    Description: 'Bedrock Agent ID'
+    Value: !Ref VcfBedrockAgent
+    Export:
+      Name: !Sub '${AWS::StackName}-AgentId'
+      
+  BedrockAgentAliasId:
+    Description: 'Bedrock Agent Alias ID'
+    Value: !GetAtt VcfBedrockAgentAlias.AgentAliasId
+    Export:
+      Name: !Sub '${AWS::StackName}-AgentAliasId'
+      
+  BedrockAgentAliasArn:
+    Description: 'Bedrock Agent Alias ARN'
+    Value: !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent-alias/${VcfBedrockAgent}/${VcfBedrockAgentAlias}'
+    Export:
+      Name: !Sub '${AWS::StackName}-AgentAliasArn'
+
+  GlueDatabaseName:
+    Description: 'Glue database name'
+    Value: !Ref VcfGlueDatabase
+    Export:
+      Name: !Sub '${AWS::StackName}-Database'

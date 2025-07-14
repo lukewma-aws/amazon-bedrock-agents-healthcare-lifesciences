@@ -1,541 +1,379 @@
-AWSTemplateFormatVersion: "2010-09-09"
-Description: Creates the Athena SQL Generator Agent for analyzing data lakes by converting natural language questions to SQL statements and executing them on Amazon Athena.
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Athena SQL Generator Agent for HCLS Agents Toolkit'
 
 Parameters:
-  AgentAliasName:
-    Type: String
-    Default: "Latest"
-    Description: Name for the agent alias
-  BedrockModelId:
-    Type: String
-    Description: The ID of the Foundation Model to use for the Agent
-    Default: us.anthropic.claude-3-5-sonnet-20241022-v2:0
   AgentIAMRoleArn:
     Type: String
-    Description: (Optional) Amazon Bedrock Agents service role ARN
-    Default: ""
-  AthenaDatabase:
+    Description: "ARN of the IAM role for the Bedrock agent and Lambda function"
+  
+  S3CodeBucket:
     Type: String
-    Description: Athena database name for queries
-    Default: "default"
+    Description: "S3 bucket containing the agent code"
+  
+  S3CodeKey:
+    Type: String
+    Description: "S3 key prefix for the agent code"
+    Default: "repo"
+  
+  BedrockModelId:
+    Type: String
+    Description: "The ID of the Foundation Model to use for the Agent"
+    Default: "us.anthropic.claude-3-5-sonnet-20241022-v2:0"
+  
   AthenaWorkgroup:
     Type: String
-    Description: Athena workgroup for query execution
+    Description: "Athena workgroup to use for queries"
     Default: "primary"
-  S3ResultsBucket:
+  
+  AthenaResultsBucket:
     Type: String
-    Description: S3 bucket for Athena query results
-    Default: ""
-
-Conditions:
-  CreateAgentAliasCondition: !Not [!Equals [!Ref AgentAliasName, ""]]
-  AgentIAMRoleCondition: !Not [!Equals [!Ref AgentIAMRoleArn, ""]]
-  AthenaConfigured: !Not [!Equals [!Ref S3ResultsBucket, ""]]
+    Description: "S3 bucket for Athena query results"
 
 Resources:
-  ########################
-  ##### Athena Query #####
-  ########################
-
-  AthenaQueryLambdaRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: 2012-10-17
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service:
-                - lambda.amazonaws.com
-            Action:
-              - sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-      Policies:
-        - PolicyName: AthenaAccess
-          PolicyDocument:
-            Version: 2012-10-17
-            Statement:
-              - Effect: Allow
-                Action:
-                  - athena:StartQueryExecution
-                  - athena:GetQueryExecution
-                  - athena:GetQueryResults
-                  - athena:StopQueryExecution
-                  - athena:ListQueryExecutions
-                  - athena:GetDataCatalog
-                  - athena:ListDataCatalogs
-                  - athena:ListDatabases
-                  - athena:ListTableMetadata
-                  - athena:GetTableMetadata
-                Resource: "*"
-        - PolicyName: GlueAccess
-          PolicyDocument:
-            Version: 2012-10-17
-            Statement:
-              - Effect: Allow
-                Action:
-                  - glue:GetDatabase
-                  - glue:GetDatabases
-                  - glue:GetTable
-                  - glue:GetTables
-                  - glue:GetPartitions
-                Resource: "*"
-        - PolicyName: S3Access
-          PolicyDocument:
-            Version: 2012-10-17
-            Statement:
-              - Effect: Allow
-                Action:
-                  - s3:GetObject
-                  - s3:ListBucket
-                  - s3:PutObject
-                  - s3:DeleteObject
-                Resource: 
-                  - !Sub "arn:aws:s3:::${S3ResultsBucket}"
-                  - !Sub "arn:aws:s3:::${S3ResultsBucket}/*"
-
-  AthenaQueryLogGroup:
-    Type: AWS::Logs::LogGroup
-    Properties:
-      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-athena-query"
-      RetentionInDays: 14
-
-  AthenaQueryLambdaFunction:
+  ##################################################################
+  # Lambda Function for Athena SQL Generation and Execution
+  ##################################################################
+  
+  AthenaSQLGeneratorFunction:
     Type: AWS::Lambda::Function
-    #DeletionPolicy: Retain
     Properties:
-      FunctionName: !Sub "AthenaQuery"
-      Role: !GetAtt AthenaQueryLambdaRole.Arn
-      Runtime: python3.12
+      FunctionName: !Sub "athena-sql-gen-${AWS::AccountId}"
+      Runtime: python3.11
       Handler: lambda_function.lambda_handler
+      Role: !Ref AgentIAMRoleArn
       Timeout: 300
       MemorySize: 1024
       Environment:
         Variables:
-          LOG_LEVEL: "INFO"
-          ATHENA_DATABASE: !Ref AthenaDatabase
           ATHENA_WORKGROUP: !Ref AthenaWorkgroup
-          S3_RESULTS_BUCKET: !Ref S3ResultsBucket
-      Code:
-        ZipFile: |
-          import json
-          import logging
-          import boto3
-          import time
-          import os
-          from typing import Dict, List, Any, Optional
+          ATHENA_RESULTS_BUCKET: !Ref AthenaResultsBucket
+          ATHENA_RESULTS_PREFIX: "athena-results/"
+      Code: "action-groups/athena-sql-generator"
+      Tags:
+        - Key: Project
+          Value: "hcls-agents-toolkit"
+        - Key: Agent
+          Value: "athena-sql-generator"
 
-          logger = logging.getLogger()
-          logger.setLevel(logging.INFO)
+  ##################################################################
+  # Bedrock Agent
+  ##################################################################
+  
+  AthenaSQLGeneratorBedrockAgent:
+    Type: AWS::Bedrock::Agent
+    Properties:
+      AgentName: !Sub "${AWS::StackName}-athena-sql-generator"
+      Description: "Agent specialized in generating and executing Athena SQL queries for healthcare data analysis"
+      FoundationModel: !Ref BedrockModelId
+      AgentResourceRoleArn: !Ref AgentIAMRoleArn
+      Instruction: |
+        You are an Athena SQL Generator Agent specialized in healthcare and life sciences data analysis. Your primary role is to:
 
-          # Initialize AWS clients
-          athena_client = boto3.client('athena')
-          glue_client = boto3.client('glue')
+        1. **Generate SQL Queries**: Create optimized Athena SQL queries from natural language descriptions
+        2. **Execute Queries**: Run SQL queries safely in Amazon Athena
+        3. **Schema Analysis**: Analyze table schemas and suggest optimal query structures
+        4. **Data Exploration**: Help users explore and understand their healthcare datasets
+        5. **Performance Optimization**: Suggest query optimizations for better performance and cost efficiency
 
-          def lambda_handler(event, context):
-              """
-              Lambda function to execute SQL queries on Athena
-              """
-              try:
-                  logger.info(f"Received event: {json.dumps(event)}")
-                  
-                  # Extract parameters from the event
-                  parameters = event.get('parameters', [])
-                  param_dict = {param['name']: param['value'] for param in parameters}
-                  
-                  action = param_dict.get('action', '')
-                  
-                  if action == 'get_schema':
-                      result = get_database_schema()
-                  elif action == 'execute_query':
-                      query = param_dict.get('query', '')
-                      result = execute_athena_query(query)
-                  elif action == 'validate_query':
-                      query = param_dict.get('query', '')
-                      result = validate_sql_query(query)
-                  else:
-                      result = {'error': f'Unknown action: {action}'}
-                  
-                  return {
-                      'response': {
-                          'actionGroupInvocationOutput': {
-                              'text': json.dumps(result, indent=2, default=str)
+        Key capabilities:
+        - Generate SQL for complex healthcare data queries including genomics, clinical trials, and patient data
+        - Handle partitioned tables and optimize for Athena's columnar storage
+        - Provide query cost estimates and performance recommendations
+        - Support common healthcare data formats (FHIR, HL7, genomic formats)
+        - Generate queries for biomarker analysis, patient cohort identification, and clinical outcome analysis
+        - Create aggregation queries for population health analytics
+
+        Safety features:
+        - Only execute SELECT queries (no data modification)
+        - Validate queries before execution
+        - Implement query timeouts and result limits
+        - Sanitize inputs to prevent SQL injection
+
+        When responding:
+        - Always explain the generated SQL query logic
+        - Provide query performance tips when relevant
+        - Suggest alternative query approaches when appropriate
+        - Include estimated costs for large queries
+        - Recommend appropriate partitioning strategies
+        - Highlight any potential data privacy considerations
+
+        Focus on healthcare-specific use cases including clinical research, genomics analysis, drug discovery, and population health studies.
+      ActionGroups:
+        - ActionGroupName: "sql-generation"
+          Description: "Generate and execute Athena SQL queries"
+          ActionGroupExecutor:
+            Lambda: !GetAtt AthenaSQLGeneratorFunction.Arn
+          ApiSchema:
+            Payload: |
+              {
+                "openapi": "3.0.0",
+                "info": {
+                  "title": "Athena SQL Generator API",
+                  "version": "1.0.0",
+                  "description": "API for generating and executing Athena SQL queries"
+                },
+                "paths": {
+                  "/generate": {
+                    "post": {
+                      "summary": "Generate SQL query from natural language",
+                      "description": "Generate an Athena SQL query based on natural language description",
+                      "operationId": "generateSQL",
+                      "requestBody": {
+                        "required": true,
+                        "content": {
+                          "application/json": {
+                            "schema": {
+                              "type": "object",
+                              "properties": {
+                                "action": {
+                                  "type": "string",
+                                  "enum": ["generate"],
+                                  "default": "generate"
+                                },
+                                "description": {
+                                  "type": "string",
+                                  "description": "Natural language description of the desired query"
+                                },
+                                "database": {
+                                  "type": "string",
+                                  "description": "Database name",
+                                  "default": "default"
+                                },
+                                "tables": {
+                                  "type": "array",
+                                  "items": {"type": "string"},
+                                  "description": "List of table names to include in query generation"
+                                }
+                              },
+                              "required": ["description"]
+                            }
                           }
-                      }
-                  }
-                  
-              except Exception as e:
-                  logger.error(f"Error in lambda_handler: {str(e)}")
-                  return {
-                      'response': {
-                          'actionGroupInvocationOutput': {
-                              'text': f'Error processing request: {str(e)}'
-                          }
-                      }
-                  }
-
-          def get_database_schema() -> Dict[str, Any]:
-              """
-              Get the database schema information from Glue Data Catalog
-              """
-              try:
-                  database_name = os.environ.get('ATHENA_DATABASE', 'default')
-                  
-                  # Get database information
-                  try:
-                      database_response = glue_client.get_database(Name=database_name)
-                      database_info = database_response['Database']
-                  except Exception as e:
-                      logger.warning(f"Could not get database info: {str(e)}")
-                      database_info = {'Name': database_name}
-                  
-                  # Get tables in the database
-                  tables_response = glue_client.get_tables(DatabaseName=database_name)
-                  tables = tables_response['TableList']
-                  
-                  schema_info = {
-                      'database': database_info,
-                      'tables': {}
-                  }
-                  
-                  for table in tables:
-                      table_name = table['Name']
-                      columns = []
-                      
-                      for column in table.get('StorageDescriptor', {}).get('Columns', []):
-                          columns.append({
-                              'column_name': column['Name'],
-                              'data_type': column['Type'],
-                              'comment': column.get('Comment', '')
-                          })
-                      
-                      # Add partition columns if they exist
-                      for partition_key in table.get('PartitionKeys', []):
-                          columns.append({
-                              'column_name': partition_key['Name'],
-                              'data_type': partition_key['Type'],
-                              'comment': partition_key.get('Comment', ''),
-                              'is_partition': True
-                          })
-                      
-                      schema_info['tables'][table_name] = {
-                          'columns': columns,
-                          'location': table.get('StorageDescriptor', {}).get('Location', ''),
-                          'input_format': table.get('StorageDescriptor', {}).get('InputFormat', ''),
-                          'output_format': table.get('StorageDescriptor', {}).get('OutputFormat', ''),
-                          'table_type': table.get('TableType', ''),
-                          'parameters': table.get('Parameters', {})
-                      }
-                  
-                  return {
-                      'action': 'get_schema',
-                      'schema': schema_info,
-                      'message': 'Database schema retrieved successfully'
-                  }
-                  
-              except Exception as e:
-                  logger.error(f"Error getting database schema: {str(e)}")
-                  return {'error': f'Failed to get database schema: {str(e)}'}
-
-          def execute_athena_query(query: str) -> Dict[str, Any]:
-              """
-              Execute SQL query on Athena
-              """
-              try:
-                  database_name = os.environ.get('ATHENA_DATABASE', 'default')
-                  workgroup = os.environ.get('ATHENA_WORKGROUP', 'primary')
-                  s3_results_bucket = os.environ.get('S3_RESULTS_BUCKET')
-                  
-                  if not s3_results_bucket:
-                      return {'error': 'S3 results bucket not configured'}
-                  
-                  if not query.strip():
-                      return {'error': 'Query cannot be empty'}
-                  
-                  # Start query execution
-                  response = athena_client.start_query_execution(
-                      QueryString=query,
-                      QueryExecutionContext={'Database': database_name},
-                      ResultConfiguration={
-                          'OutputLocation': f's3://{s3_results_bucket}/athena-results/'
+                        }
                       },
-                      WorkGroup=workgroup
-                  )
-                  
-                  query_execution_id = response['QueryExecutionId']
-                  
-                  # Wait for query completion
-                  result = wait_for_query_completion(query_execution_id)
-                  
-                  if result.get('error'):
-                      return result
-                  
-                  # Get query results
-                  results_response = athena_client.get_query_results(
-                      QueryExecutionId=query_execution_id
-                  )
-                  
-                  # Process results
-                  result_set = results_response['ResultSet']
-                  columns = []
-                  rows = []
-                  
-                  if 'ColumnInfos' in result_set:
-                      columns = [col['Name'] for col in result_set['ColumnInfos']]
-                  
-                  if 'Rows' in result_set:
-                      # Skip header row if present
-                      data_rows = result_set['Rows'][1:] if len(result_set['Rows']) > 1 else []
-                      
-                      for row in data_rows:
-                          row_data = []
-                          for field in row['Data']:
-                              row_data.append(field.get('VarCharValue', ''))
-                          rows.append(row_data)
-                  
-                  return {
-                      'action': 'execute_query',
-                      'query': query,
-                      'query_execution_id': query_execution_id,
-                      'columns': columns,
-                      'rows': rows,
-                      'row_count': len(rows),
-                      'message': 'Query executed successfully'
-                  }
-                  
-              except Exception as e:
-                  logger.error(f"Error executing Athena query: {str(e)}")
-                  return {'error': f'Failed to execute query: {str(e)}'}
-
-          def validate_sql_query(query: str) -> Dict[str, Any]:
-              """
-              Validate SQL query syntax without executing it
-              """
-              try:
-                  # Basic SQL validation
-                  query = query.strip()
-                  
-                  if not query:
-                      return {'valid': False, 'error': 'Query cannot be empty'}
-                  
-                  # Check for potentially dangerous operations
-                  dangerous_keywords = ['DROP', 'DELETE', 'TRUNCATE', 'ALTER', 'CREATE', 'INSERT', 'UPDATE']
-                  query_upper = query.upper()
-                  
-                  for keyword in dangerous_keywords:
-                      if keyword in query_upper:
-                          return {
-                              'valid': False, 
-                              'error': f'Query contains potentially dangerous operation: {keyword}'
+                      "responses": {
+                        "200": {
+                          "description": "Successfully generated SQL query",
+                          "content": {
+                            "application/json": {
+                              "schema": {
+                                "type": "object",
+                                "properties": {
+                                  "description": {"type": "string"},
+                                  "database": {"type": "string"},
+                                  "generated_sql": {"type": "string"},
+                                  "table_schemas": {"type": "object"},
+                                  "timestamp": {"type": "string"}
+                                }
+                              }
+                            }
                           }
-                  
-                  # Check if it's a SELECT statement
-                  if not query_upper.strip().startswith('SELECT'):
-                      return {
-                          'valid': False,
-                          'error': 'Only SELECT queries are allowed'
+                        }
                       }
-                  
-                  return {
-                      'valid': True,
-                      'message': 'Query validation passed'
+                    }
+                  },
+                  "/execute": {
+                    "post": {
+                      "summary": "Execute SQL query in Athena",
+                      "description": "Execute a SQL query in Amazon Athena and return results",
+                      "operationId": "executeSQL",
+                      "requestBody": {
+                        "required": true,
+                        "content": {
+                          "application/json": {
+                            "schema": {
+                              "type": "object",
+                              "properties": {
+                                "action": {
+                                  "type": "string",
+                                  "enum": ["execute"],
+                                  "default": "execute"
+                                },
+                                "sql_query": {
+                                  "type": "string",
+                                  "description": "SQL query to execute"
+                                },
+                                "database": {
+                                  "type": "string",
+                                  "description": "Database name",
+                                  "default": "default"
+                                }
+                              },
+                              "required": ["sql_query"]
+                            }
+                          }
+                        }
+                      },
+                      "responses": {
+                        "200": {
+                          "description": "Query executed successfully",
+                          "content": {
+                            "application/json": {
+                              "schema": {
+                                "type": "object",
+                                "properties": {
+                                  "query_execution_id": {"type": "string"},
+                                  "status": {"type": "string"},
+                                  "results": {"type": "object"},
+                                  "row_count": {"type": "integer"},
+                                  "execution_time_ms": {"type": "integer"}
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "/describe-tables": {
+                    "post": {
+                      "summary": "List tables in database",
+                      "description": "Get list of tables in the specified database",
+                      "operationId": "describeTables",
+                      "requestBody": {
+                        "required": true,
+                        "content": {
+                          "application/json": {
+                            "schema": {
+                              "type": "object",
+                              "properties": {
+                                "action": {
+                                  "type": "string",
+                                  "enum": ["describe_tables"],
+                                  "default": "describe_tables"
+                                },
+                                "database": {
+                                  "type": "string",
+                                  "description": "Database name",
+                                  "default": "default"
+                                }
+                              }
+                            }
+                          }
+                        }
+                      },
+                      "responses": {
+                        "200": {
+                          "description": "Tables listed successfully",
+                          "content": {
+                            "application/json": {
+                              "schema": {
+                                "type": "object",
+                                "properties": {
+                                  "database": {"type": "string"},
+                                  "tables": {"type": "array"},
+                                  "table_count": {"type": "integer"}
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "/get-schema": {
+                    "post": {
+                      "summary": "Get table schema",
+                      "description": "Get detailed schema information for a specific table",
+                      "operationId": "getTableSchema",
+                      "requestBody": {
+                        "required": true,
+                        "content": {
+                          "application/json": {
+                            "schema": {
+                              "type": "object",
+                              "properties": {
+                                "action": {
+                                  "type": "string",
+                                  "enum": ["get_schema"],
+                                  "default": "get_schema"
+                                },
+                                "database": {
+                                  "type": "string",
+                                  "description": "Database name",
+                                  "default": "default"
+                                },
+                                "table_name": {
+                                  "type": "string",
+                                  "description": "Table name"
+                                }
+                              },
+                              "required": ["table_name"]
+                            }
+                          }
+                        }
+                      },
+                      "responses": {
+                        "200": {
+                          "description": "Schema retrieved successfully",
+                          "content": {
+                            "application/json": {
+                              "schema": {
+                                "type": "object",
+                                "properties": {
+                                  "database": {"type": "string"},
+                                  "table_name": {"type": "string"},
+                                  "schema": {"type": "object"}
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
                   }
-                  
-              except Exception as e:
-                  logger.error(f"Error validating SQL query: {str(e)}")
-                  return {'valid': False, 'error': f'Validation error: {str(e)}'}
+                }
+              }
+      Tags:
+        Project: "hcls-agents-toolkit"
+        Agent: "athena-sql-generator"
 
-          def wait_for_query_completion(query_execution_id: str, max_wait_time: int = 60) -> Dict[str, Any]:
-              """
-              Wait for query completion with timeout
-              """
-              start_time = time.time()
-              
-              while time.time() - start_time < max_wait_time:
-                  try:
-                      response = athena_client.get_query_execution(QueryExecutionId=query_execution_id)
-                      status = response['QueryExecution']['Status']['State']
-                      
-                      if status == 'SUCCEEDED':
-                          return {'status': 'completed'}
-                      elif status == 'FAILED':
-                          error_msg = response['QueryExecution']['Status'].get('StateChangeReason', 'Unknown error')
-                          return {'error': f'Query failed: {error_msg}'}
-                      elif status == 'CANCELLED':
-                          return {'error': 'Query was cancelled'}
-                      
-                      # Wait before checking again
-                      time.sleep(2)
-                      
-                  except Exception as e:
-                      logger.error(f"Error checking query status: {str(e)}")
-                      return {'error': f'Error checking query status: {str(e)}'}
-              
-              return {'error': 'Query timed out'}
-
-  AthenaQueryLambdaPermission:
+  ##################################################################
+  # Lambda Permission for Bedrock Agent
+  ##################################################################
+  
+  AthenaSQLGeneratorFunctionPermission:
     Type: AWS::Lambda::Permission
     Properties:
+      FunctionName: !Ref AthenaSQLGeneratorFunction
       Action: lambda:InvokeFunction
-      FunctionName: !GetAtt AthenaQueryLambdaFunction.Arn
       Principal: bedrock.amazonaws.com
-      SourceAccount: !Ref AWS::AccountId
-      SourceArn: !Sub arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent/*
+      SourceArn: !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent/${AthenaSQLGeneratorBedrockAgent}"
 
-  #####################
-  ##### Agent #####
-  ###################
-
-  AthenaSQLGeneratorAgent:
-    Type: AWS::Bedrock::Agent
-    #DeletionPolicy: Retain
-    Properties:
-      ActionGroups:
-        - ActionGroupName: "UserInputAction"
-          ParentActionGroupSignature: "AMAZON.UserInput"
-          ActionGroupState: "ENABLED"
-        - ActionGroupName: AthenaQuery
-          Description: Query data lakes using natural language converted to SQL on Amazon Athena
-          ActionGroupExecutor:
-            Lambda: !GetAtt AthenaQueryLambdaFunction.Arn
-          ActionGroupState: ENABLED
-          FunctionSchema:
-            Functions:
-              - Name: get_database_schema
-                Description: Retrieve the database schema information including tables, columns, and data types from AWS Glue Data Catalog to understand the available data structure.
-                Parameters: {}
-              - Name: execute_athena_query
-                Description: Execute a SQL SELECT query on Amazon Athena to retrieve specific data from data lakes based on natural language questions.
-                Parameters:
-                  query:
-                    Description: "SQL SELECT query to execute on Athena (only SELECT statements allowed)"
-                    Type: string
-                    Required: True
-              - Name: validate_sql_query
-                Description: Validate SQL query syntax and safety before execution to ensure it follows security guidelines.
-                Parameters:
-                  query:
-                    Description: "SQL query to validate"
-                    Type: string
-                    Required: True
-      AgentName: "Athena-SQL-Generator-Agent"
-      AgentResourceRoleArn:
-        "Fn::If":
-          - AgentIAMRoleCondition
-          - !Ref AgentIAMRoleArn
-          - "{{resolve:ssm:/bedrock/agent/role/arn:1}}"
-      AutoPrepare: True
-      Description: "Analyzes data lakes by converting natural language questions to SQL statements and executing them on Amazon Athena"
-      FoundationModel: !Ref BedrockModelId
-      GuardrailConfiguration:
-        GuardrailIdentifier: !GetAtt AthenaSQLGeneratorGuardrail.GuardrailId
-        GuardrailVersion: !GetAtt AthenaSQLGeneratorGuardrail.Version
-      Instruction: |
-        You are an Athena SQL generator specializing in analyzing data lakes by converting natural language questions into SQL statements and executing them on Amazon Athena. Your role is to help users query and analyze large-scale datasets stored in S3 data lakes.
-
-        You have access to the following tools:
-
-        - get_database_schema: Retrieve database schema information from AWS Glue Data Catalog to understand available tables, columns, and data types
-        - execute_athena_query: Execute SQL SELECT queries on Amazon Athena to retrieve data from S3 data lakes
-        - validate_sql_query: Validate SQL query syntax and safety before execution
-
-        Analysis Process
-
-        1. Start by understanding the user's question about the data lake
-        2. Use get_database_schema to understand the available data structure if needed
-        3. Convert the natural language question into appropriate SQL queries optimized for Athena
-        4. Validate queries using validate_sql_query before execution
-        5. Execute queries using execute_athena_query to retrieve relevant data
-        6. Analyze and interpret the results to answer the user's question
-        7. Provide insights, trends, and statistical summaries as appropriate
-
-        Data Lake Context
-
-        The data lake typically contains:
-        - Structured data: CSV, Parquet, ORC files with tabular data
-        - Semi-structured data: JSON, XML files with nested structures
-        - Log data: Application logs, web server logs, system metrics
-        - Time-series data: IoT sensor data, financial data, monitoring metrics
-        - Partitioned data: Data organized by date, region, or other dimensions
-
-        Query Guidelines
-
-        - Only use SELECT statements (no INSERT, UPDATE, DELETE, DROP, etc.)
-        - Always validate queries before execution
-        - Use appropriate WHERE clauses to filter data and reduce scan costs
-        - Leverage partition pruning when possible to improve performance
-        - Use columnar formats (Parquet, ORC) efficiently with column projection
-        - Include LIMIT clauses for exploratory queries to control costs
-        - Use appropriate data types and casting when necessary
-        - Handle NULL values appropriately in calculations
-
-        Athena-Specific Optimizations
-
-        - Use partition projection for time-based partitions
-        - Leverage CTAS (CREATE TABLE AS SELECT) for intermediate results
-        - Use approximate functions (approx_distinct, approx_percentile) for large datasets
-        - Consider using window functions for analytical queries
-        - Use array and map functions for complex data types
-        - Optimize JOIN operations by putting smaller tables first
-
-        Response Guidelines
-
-        - Provide clear, data-driven answers based on query results
-        - Include relevant statistics and aggregations
-        - Explain query performance considerations and costs
-        - Suggest optimizations for expensive queries
-        - Present results in structured formats with clear interpretations
-        - Always mention data sources, time ranges, and sample sizes
-        - Highlight any data quality issues or limitations discovered
-
-        Example Analysis Areas
-
-        - Data exploration and profiling
-        - Time-series analysis and trend identification
-        - Log analysis and anomaly detection
-        - Business intelligence and reporting
-        - Data quality assessment
-        - Performance monitoring and optimization
-
-  AgentAliasResource:
+  ##################################################################
+  # Agent Alias
+  ##################################################################
+  
+  AthenaSQLGeneratorAgentAlias:
     Type: AWS::Bedrock::AgentAlias
-    Condition: CreateAgentAliasCondition
     Properties:
-      AgentId: !GetAtt AthenaSQLGeneratorAgent.AgentId
-      AgentAliasName: !Ref AgentAliasName
-
-  AthenaSQLGeneratorGuardrail:
-    Type: AWS::Bedrock::Guardrail
-    Properties:
-      BlockedInputMessaging: "Sorry, your query violates our usage policies."
-      BlockedOutputsMessaging: "Sorry, I am unable to reply because the output violates our usage policies."
-      ContentPolicyConfig:
-        FiltersConfig:
-          - InputStrength: "HIGH"
-            OutputStrength: "HIGH"
-            Type: "MISCONDUCT"
-          - InputStrength: "HIGH"
-            OutputStrength: "NONE"
-            Type: "PROMPT_ATTACK"
-      Description: Guardrail for Athena SQL Generator agent to block harmful content.
-      Name: AthenaSQLGeneratorGuardrail
-      WordPolicyConfig:
-        ManagedWordListsConfig:
-          - Type: PROFANITY
+      AgentId: !Ref AthenaSQLGeneratorBedrockAgent
+      AgentAliasName: "PROD"
+      Description: "Production alias for Athena SQL Generator Agent"
+      Tags:
+        Project: "hcls-agents-toolkit"
+        Agent: "athena-sql-generator"
 
 Outputs:
   AgentId:
-    Description: Agent ID
-    Value: !Ref AthenaSQLGeneratorAgent
+    Description: "Athena SQL Generator Agent ID"
+    Value: !Ref AthenaSQLGeneratorBedrockAgent
+    Export:
+      Name: !Sub "${AWS::StackName}-AgentId"
+  
   AgentAliasId:
-    Description: Agent Alias ID
-    Value: !GetAtt AgentAliasResource.AgentAliasId
-    Condition: CreateAgentAliasCondition
+    Description: "Athena SQL Generator Agent Alias ID"
+    Value: !GetAtt AthenaSQLGeneratorAgentAlias.AgentAliasId
+    Export:
+      Name: !Sub "${AWS::StackName}-AgentAliasId"
+  
   AgentAliasArn:
-    Description: Agent Alias ARN
-    Value: !GetAtt AgentAliasResource.AgentAliasArn
-    Condition: CreateAgentAliasCondition
-  AthenaQueryLambdaFunctionArn:
-    Description: Athena Query Lambda Function ARN
-    Value: !GetAtt AthenaQueryLambdaFunction.Arn
+    Description: "Athena SQL Generator Agent Alias ARN"
+    Value: !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent-alias/${AthenaSQLGeneratorBedrockAgent}/${AthenaSQLGeneratorAgentAlias}"
+    Export:
+      Name: !Sub "${AWS::StackName}-AgentAliasArn"
+  
+  LambdaFunctionArn:
+    Description: "Athena SQL Generator Lambda Function ARN"
+    Value: !GetAtt AthenaSQLGeneratorFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-LambdaFunctionArn"
