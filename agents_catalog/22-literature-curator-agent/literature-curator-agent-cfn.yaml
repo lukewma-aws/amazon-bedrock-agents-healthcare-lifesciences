@@ -75,7 +75,6 @@ Resources:
   LiteratureCurationFunction:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: !Sub "lit-search-${AWS::AccountId}"
       Runtime: python3.11
       Handler: lambda_function.lambda_handler
       Role: !GetAtt LiteratureCurationFunctionRole.Arn

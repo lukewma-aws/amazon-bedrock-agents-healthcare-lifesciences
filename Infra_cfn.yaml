@@ -223,159 +223,159 @@ Resources:
   ##       |___/                                        |___/
   #################################################################################################################################################
   #################################################################################################################################################
-
-  BiomarkerDiscoverySupervisorAgent:
-    Type: AWS::CloudFormation::Stack
-    DependsOn:
-      - CodeBuild
-    Properties:
-      TemplateURL: multi_agent_collaboration/cancer_biomarker_discovery/agent_build.yaml
-      Parameters:
-        BedrockModelId: !Ref BedrockModelId
-        RedshiftDatabaseName: !Ref RedshiftDatabaseName
-        RedshiftUserName: !Ref RedshiftUserName
-        RedshiftPassword: !Ref RedshiftPassword
-        MultiAgentDevMode: "false"
-        EnvironmentName: env1
-        GitRepoURL: !Ref GithubLink
-        GitBranch: !Ref GitBranch
-        SubAgentS3Bucket: !Ref S3Bucket
-        VPC: !If [ CreateNetworking, !GetAtt "Network.Outputs.VPC" , !Ref ExistingVpcId ]
-        PrivateSubnet1: !If [ CreateNetworking, !GetAtt "Network.Outputs.PrivateSubnet1" , !Select [ 0, !Ref ExistingPrivateSubnets ] ]
-        PrivateSubnet2: !If [ CreateNetworking, !GetAtt "Network.Outputs.PrivateSubnet2" , !Select [ 1, !Ref ExistingPrivateSubnets ] ]
-        AgentRole: !GetAtt AgentRole.Arn
-      TimeoutInMinutes: 30
-      Tags:
-        - Key: Project
-          Value: "hcls-agents-toolkit"
-
-  ClinicalStudySearchAgent:
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: agents_catalog/15-clinical-study-research-agent/clinical-study-agent.yaml
-      Parameters:
-        AgentIAMRoleArn: !GetAtt AgentRole.Arn
-        ChartImageBucketName: !Ref S3Bucket
-      TimeoutInMinutes: 10
-      Tags:
-        - Key: Project
-          Value: "hcls-agents-toolkit"
-
-  ClinicalTrialProtocolGeneratorAgent:
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: agents_catalog/16-Clinical-trial-protocol-generator-agent/clinical-trial-protocol-generator-agent.yaml
-      Parameters:
-        AgentIAMRoleArn: !GetAtt AgentRole.Arn
-      TimeoutInMinutes: 10
-      Tags:
-        - Key: Project
-          Value: "hcls-agents-toolkit"
-
-  ClinicalTrialProtocolSupervisorAgent:
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: multi_agent_collaboration/Clinical-Trial-Protocol-Assistant/clinical-trial-protocol-assistant-cfn.yaml
-      Parameters:
-        BedrockModelId: !Ref BedrockModelId
-        AgentIAMRoleArn: !GetAtt AgentRole.Arn
-        ClinicalStudySearchAgentAliasArn: !GetAtt ClinicalStudySearchAgent.Outputs.AgentAliasArn
-        ClinicalTrialProtocolGeneratorAgentAliasArn: !GetAtt ClinicalTrialProtocolGeneratorAgent.Outputs.AgentAliasArn
-      TimeoutInMinutes: 10
-      Tags:
-        - Key: Project
-          Value: "hcls-agents-toolkit"
-
-  WebSearchAgent:
-    Type: AWS::CloudFormation::Stack
-    Condition: CreateWebSearchAgent
-    Properties:
-      TemplateURL: agents_catalog/11-Tavily-web-search-agent/web-search-agent-cfn.yaml
-      Parameters:
-        AgentIAMRoleArn: !GetAtt AgentRole.Arn
-        TavilyApiKey: !Ref TavilyApiKey
-      TimeoutInMinutes: 35
-      Tags:
-        - Key: Project
-          Value: "hcls-agents-toolkit"
-
-  SEC10kAgent:
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: agents_catalog/10-SEC-10-K-agent/sec-10-K-agent-cfn.yaml
-      Parameters:
-        AgentIAMRoleArn: !GetAtt AgentRole.Arn
-        S3CodeBucket: !Ref S3Bucket
-        S3CodeKey: !GetAtt CodeRepo.Outputs.S3Key
-      TimeoutInMinutes: 35
-      Tags:
-        - Key: Project
-          Value: "hcls-agents-toolkit"
-
-  USPTOSearchAgent:
-    Type: AWS::CloudFormation::Stack
-    Condition: CreateUSPTOSearchAgent
-    Properties:
-      TemplateURL: agents_catalog/14-USPTO-search/uspto-search-agent-cfn.yaml
-      Parameters:
-        AgentIAMRoleArn: !GetAtt AgentRole.Arn
-        USPTOApiKey: !Ref USPTOApiKey
-      TimeoutInMinutes: 35
-      Tags:
-        - Key: Project
-          Value: "hcls-agents-toolkit"
-
-  CompetitiveIntelligenceSupervisorAgent:
-    Type: AWS::CloudFormation::Stack
-    Condition: CreateCompetitiveIntelAgent
-    Properties:
-      TemplateURL: multi_agent_collaboration/competitive_intelligence/competitive-intelligence-agent-cfn.yaml
-      Parameters:
-        BedrockModelId: !Ref BedrockModelId
-        AgentIAMRoleArn: !GetAtt AgentRole.Arn
-        WebSearchAgentAliasArn: !GetAtt WebSearchAgent.Outputs.AgentAliasArn
-        SEC10kAgentAliasArn: !GetAtt SEC10kAgent.Outputs.AgentAliasArn
-        USPTOSearchAgentAliasArn: !GetAtt USPTOSearchAgent.Outputs.AgentAliasArn
-      TimeoutInMinutes: 10
-      Tags:
-        - Key: Project
-          Value: "hcls-agents-toolkit"
-
-  WileyOnlineSearchAgent:
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: agents_catalog/18-Wiley-OA-life-sciences-agent/wiley-search-agent-cfn.yaml
-      Parameters:
-        AgentIAMRoleArn: !GetAtt AgentRole.Arn
-      TimeoutInMinutes: 10
-      Tags:
-        - Key: Project
-          Value: "hcls-agents-toolkit"
-
-  UniProtProteinSearchAgent:
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: agents_catalog/19-UniProt-protein-search-agent/uniprot-protein-search-agent-cfn.yaml
-      Parameters:
-        BedrockModelId: !Ref BedrockModelId
-        AgentIAMRoleArn: !GetAtt AgentRole.Arn
-      TimeoutInMinutes: 10
-      Tags:
-        - Key: Project
-          Value: "hcls-agents-toolkit"
-
-  InvivoStudySchedulerAgent:
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: agents_catalog/21-invivo-study-scheduler-agent/invivo-study-scheduler-agent-cfn.yaml
-      Parameters:
-        AgentIAMRoleArn: !GetAtt AgentRole.Arn
-        S3CodeBucket: !Ref S3Bucket
-        S3CodeKey: !GetAtt CodeRepo.Outputs.S3Key
-      TimeoutInMinutes: 35
-      Tags:
-        - Key: Project
-          Value: "hcls-agents-toolkit"
+#
+#  BiomarkerDiscoverySupervisorAgent:
+#    Type: AWS::CloudFormation::Stack
+#    DependsOn:
+#      - CodeBuild
+#    Properties:
+#      TemplateURL: multi_agent_collaboration/cancer_biomarker_discovery/agent_build.yaml
+#      Parameters:
+#        BedrockModelId: !Ref BedrockModelId
+#        RedshiftDatabaseName: !Ref RedshiftDatabaseName
+#        RedshiftUserName: !Ref RedshiftUserName
+#        RedshiftPassword: !Ref RedshiftPassword
+#        MultiAgentDevMode: "false"
+#        EnvironmentName: env1
+#        GitRepoURL: !Ref GithubLink
+#        GitBranch: !Ref GitBranch
+#        SubAgentS3Bucket: !Ref S3Bucket
+#        VPC: !If [ CreateNetworking, !GetAtt "Network.Outputs.VPC" , !Ref ExistingVpcId ]
+#        PrivateSubnet1: !If [ CreateNetworking, !GetAtt "Network.Outputs.PrivateSubnet1" , !Select [ 0, !Ref ExistingPrivateSubnets ] ]
+#        PrivateSubnet2: !If [ CreateNetworking, !GetAtt "Network.Outputs.PrivateSubnet2" , !Select [ 1, !Ref ExistingPrivateSubnets ] ]
+#        AgentRole: !GetAtt AgentRole.Arn
+#      TimeoutInMinutes: 30
+#      Tags:
+#        - Key: Project
+#          Value: "hcls-agents-toolkit"
+#
+#  ClinicalStudySearchAgent:
+#    Type: AWS::CloudFormation::Stack
+#    Properties:
+#      TemplateURL: agents_catalog/15-clinical-study-research-agent/clinical-study-agent.yaml
+#      Parameters:
+#        AgentIAMRoleArn: !GetAtt AgentRole.Arn
+#        ChartImageBucketName: !Ref S3Bucket
+#      TimeoutInMinutes: 10
+#      Tags:
+#        - Key: Project
+#          Value: "hcls-agents-toolkit"
+#
+#  ClinicalTrialProtocolGeneratorAgent:
+#    Type: AWS::CloudFormation::Stack
+#    Properties:
+#      TemplateURL: agents_catalog/16-Clinical-trial-protocol-generator-agent/clinical-trial-protocol-generator-agent.yaml
+#      Parameters:
+#        AgentIAMRoleArn: !GetAtt AgentRole.Arn
+#      TimeoutInMinutes: 10
+#      Tags:
+#        - Key: Project
+#          Value: "hcls-agents-toolkit"
+#
+#  ClinicalTrialProtocolSupervisorAgent:
+#    Type: AWS::CloudFormation::Stack
+#    Properties:
+#      TemplateURL: multi_agent_collaboration/Clinical-Trial-Protocol-Assistant/clinical-trial-protocol-assistant-cfn.yaml
+#      Parameters:
+#        BedrockModelId: !Ref BedrockModelId
+#        AgentIAMRoleArn: !GetAtt AgentRole.Arn
+#        ClinicalStudySearchAgentAliasArn: !GetAtt ClinicalStudySearchAgent.Outputs.AgentAliasArn
+#        ClinicalTrialProtocolGeneratorAgentAliasArn: !GetAtt ClinicalTrialProtocolGeneratorAgent.Outputs.AgentAliasArn
+#      TimeoutInMinutes: 10
+#      Tags:
+#        - Key: Project
+#          Value: "hcls-agents-toolkit"
+#
+#  WebSearchAgent:
+#    Type: AWS::CloudFormation::Stack
+#    Condition: CreateWebSearchAgent
+#    Properties:
+#      TemplateURL: agents_catalog/11-Tavily-web-search-agent/web-search-agent-cfn.yaml
+#      Parameters:
+#        AgentIAMRoleArn: !GetAtt AgentRole.Arn
+#        TavilyApiKey: !Ref TavilyApiKey
+#      TimeoutInMinutes: 35
+#      Tags:
+#        - Key: Project
+#          Value: "hcls-agents-toolkit"
+#
+#  SEC10kAgent:
+#    Type: AWS::CloudFormation::Stack
+#    Properties:
+#      TemplateURL: agents_catalog/10-SEC-10-K-agent/sec-10-K-agent-cfn.yaml
+#      Parameters:
+#        AgentIAMRoleArn: !GetAtt AgentRole.Arn
+#        S3CodeBucket: !Ref S3Bucket
+#        S3CodeKey: !GetAtt CodeRepo.Outputs.S3Key
+#      TimeoutInMinutes: 35
+#      Tags:
+#        - Key: Project
+#          Value: "hcls-agents-toolkit"
+#
+#  USPTOSearchAgent:
+#    Type: AWS::CloudFormation::Stack
+#    Condition: CreateUSPTOSearchAgent
+#    Properties:
+#      TemplateURL: agents_catalog/14-USPTO-search/uspto-search-agent-cfn.yaml
+#      Parameters:
+#        AgentIAMRoleArn: !GetAtt AgentRole.Arn
+#        USPTOApiKey: !Ref USPTOApiKey
+#      TimeoutInMinutes: 35
+#      Tags:
+#        - Key: Project
+#          Value: "hcls-agents-toolkit"
+#
+#  CompetitiveIntelligenceSupervisorAgent:
+#    Type: AWS::CloudFormation::Stack
+#    Condition: CreateCompetitiveIntelAgent
+#    Properties:
+#      TemplateURL: multi_agent_collaboration/competitive_intelligence/competitive-intelligence-agent-cfn.yaml
+#      Parameters:
+#        BedrockModelId: !Ref BedrockModelId
+#        AgentIAMRoleArn: !GetAtt AgentRole.Arn
+#        WebSearchAgentAliasArn: !GetAtt WebSearchAgent.Outputs.AgentAliasArn
+#        SEC10kAgentAliasArn: !GetAtt SEC10kAgent.Outputs.AgentAliasArn
+#        USPTOSearchAgentAliasArn: !GetAtt USPTOSearchAgent.Outputs.AgentAliasArn
+#      TimeoutInMinutes: 10
+#      Tags:
+#        - Key: Project
+#          Value: "hcls-agents-toolkit"
+#
+#  WileyOnlineSearchAgent:
+#    Type: AWS::CloudFormation::Stack
+#    Properties:
+#      TemplateURL: agents_catalog/18-Wiley-OA-life-sciences-agent/wiley-search-agent-cfn.yaml
+#      Parameters:
+#        AgentIAMRoleArn: !GetAtt AgentRole.Arn
+#      TimeoutInMinutes: 10
+#      Tags:
+#        - Key: Project
+#          Value: "hcls-agents-toolkit"
+#
+#  UniProtProteinSearchAgent:
+#    Type: AWS::CloudFormation::Stack
+#    Properties:
+#      TemplateURL: agents_catalog/19-UniProt-protein-search-agent/uniprot-protein-search-agent-cfn.yaml
+#      Parameters:
+#        BedrockModelId: !Ref BedrockModelId
+#        AgentIAMRoleArn: !GetAtt AgentRole.Arn
+#      TimeoutInMinutes: 10
+#      Tags:
+#        - Key: Project
+#          Value: "hcls-agents-toolkit"
+#
+#  InvivoStudySchedulerAgent:
+#    Type: AWS::CloudFormation::Stack
+#    Properties:
+#      TemplateURL: agents_catalog/21-invivo-study-scheduler-agent/invivo-study-scheduler-agent-cfn.yaml
+#      Parameters:
+#        AgentIAMRoleArn: !GetAtt AgentRole.Arn
+#        S3CodeBucket: !Ref S3Bucket
+#        S3CodeKey: !GetAtt CodeRepo.Outputs.S3Key
+#      TimeoutInMinutes: 35
+#      Tags:
+#        - Key: Project
+#          Value: "hcls-agents-toolkit"
 
   LiteratureCuratorAgent:
     DeletionPolicy: Retain
@@ -387,7 +387,6 @@ Resources:
         S3CodeBucket: !Ref S3Bucket
         S3CodeKey: !GetAtt CodeRepo.Outputs.S3Key
       TimeoutInMinutes: 10
-      OnFailure: DO_NOTHING
       Tags:
         - Key: Project
           Value: "hcls-agents-toolkit"
@@ -403,7 +402,6 @@ Resources:
         S3CodeBucket: !Ref S3Bucket
         S3CodeKey: !GetAtt CodeRepo.Outputs.S3Key
       TimeoutInMinutes: 10
-      OnFailure: DO_NOTHING
       Tags:
         - Key: Project
           Value: "hcls-agents-toolkit"          
@@ -419,7 +417,6 @@ Resources:
         S3CodeBucket: !Ref S3Bucket
         S3CodeKey: !GetAtt CodeRepo.Outputs.S3Key
       TimeoutInMinutes: 10
-      OnFailure: DO_NOTHING
       Tags:
         - Key: Project
           Value: "hcls-agents-toolkit"

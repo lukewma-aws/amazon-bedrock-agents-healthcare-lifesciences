@@ -95,7 +95,6 @@ Resources:
   AthenaSQLGeneratorFunction:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: !Sub "athena-sql-gen-${!Select [0, !Split ['-', !Ref 'AWS::StackId']]}"
       Runtime: python3.11
       Handler: lambda_function.lambda_handler
       Role: !GetAtt AthenaSQLGeneratorFunctionRole.Arn
